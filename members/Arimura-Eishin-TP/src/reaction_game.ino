@@ -1,14 +1,20 @@
-#include <Wire.h>
-#include <LiquidCrystal_I2C.h>
+#include <LiquidCrystal.h>
 
 // Hardware settings
 const int BUTTON_PIN = 9;   // INPUT_PULLUP: pressed = LOW
 const int BUZZER_PIN = 8;
-const int LCD_ADDR = 0x27;
+const int LCD_RS_PIN = 7;
+const int LCD_E_PIN = 6;
+const int LCD_D4_PIN = 5;
+const int LCD_D5_PIN = 4;
+const int LCD_D6_PIN = 3;
+const int LCD_D7_PIN = 2;
 
-LiquidCrystal_I2C lcd(LCD_ADDR, 16, 2);
+LiquidCrystal lcd(LCD_RS_PIN, LCD_E_PIN, LCD_D4_PIN, LCD_D5_PIN, LCD_D6_PIN, LCD_D7_PIN);
 
 enum GameState {
+  STATE_IDLE,
+  STATE_READY,
   STATE_WAIT,
   STATE_GO,
   STATE_RESULT,
@@ -21,7 +27,7 @@ enum SoundType {
   SOUND_BEST
 };
 
-GameState currentState = STATE_WAIT;
+GameState currentState = STATE_IDLE;
 
 // Time management
 unsigned long stateEnteredMs = 0;
@@ -41,6 +47,7 @@ bool lastRawLevel = HIGH;
 unsigned long lastDebounceMs = 0;
 const unsigned long DEBOUNCE_MS = 50;
 const unsigned long GO_TIMEOUT_MS = 3000;
+const unsigned long READY_DISPLAY_MS = 800;
 
 void setup();
 void loop();
@@ -58,18 +65,25 @@ void setup() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(BUZZER_PIN, OUTPUT);
 
-  lcd.init();
-  lcd.backlight();
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("READY");
-
+  lcd.begin(16, 2);
   randomSeed(analogRead(A0));
-  enterState(STATE_WAIT);
+  enterState(STATE_IDLE);
 }
 
 void loop() {
   switch (currentState) {
+    case STATE_IDLE:
+      if (readButton()) {
+        enterState(STATE_READY);
+      }
+      break;
+
+    case STATE_READY:
+      if (millis() - stateEnteredMs >= READY_DISPLAY_MS) {
+        enterState(STATE_WAIT);
+      }
+      break;
+
     case STATE_WAIT:
       if (checkFalseStart()) {
         enterState(STATE_MISS);
@@ -93,6 +107,12 @@ void loop() {
         displayResult(reactionTimeUs);
         if (isBest) {
           playSound(SOUND_BEST);
+        }
+        // 平均値表示を追加
+        if (playCount > 0) {
+          delay(1200); // 結果表示を少し見せてから平均へ
+          displayAverage(totalReactionUs / playCount);
+          delay(1200); // 平均も少し見せる
         }
         enterState(STATE_RESULT);
       } else if (millis() - stateEnteredMs >= GO_TIMEOUT_MS) {
@@ -202,7 +222,19 @@ void enterState(GameState next) {
   currentState = next;
   stateEnteredMs = millis();
 
-  if (next == STATE_WAIT) {
+  if (next == STATE_IDLE) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Press button");
+    lcd.setCursor(0, 1);
+    lcd.print("to start");
+  } else if (next == STATE_READY) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("READY");
+    lcd.setCursor(0, 1);
+    lcd.print("Get set...");
+  } else if (next == STATE_WAIT) {
     waitStartedMs = millis();
     randomWaitMs = random(2000, 5001);
 
