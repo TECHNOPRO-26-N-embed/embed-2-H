@@ -40,6 +40,10 @@ unsigned long reactionTimeUs = 0;
 unsigned long bestTimeUs = 4294967295UL;
 unsigned long totalReactionUs = 0;
 unsigned long playCount = 0;
+unsigned long averageUs = 0;
+
+bool showAverageInResult = false;
+bool averageShown = false;
 
 // Button debounce
 bool stableButtonLevel = HIGH;
@@ -48,6 +52,8 @@ unsigned long lastDebounceMs = 0;
 const unsigned long DEBOUNCE_MS = 50;
 const unsigned long GO_TIMEOUT_MS = 3000;
 const unsigned long READY_DISPLAY_MS = 800;
+const unsigned long RESULT_DISPLAY_MS = 1200;
+const unsigned long AVERAGE_DISPLAY_MS = 1200;
 
 void setup();
 void loop();
@@ -108,11 +114,11 @@ void loop() {
         if (isBest) {
           playSound(SOUND_BEST);
         }
-        // 平均値表示を追加
-        if (playCount > 0) {
-          delay(1200); // 結果表示を少し見せてから平均へ
-          displayAverage(totalReactionUs / playCount);
-          delay(1200); // 平均も少し見せる
+
+        showAverageInResult = (playCount > 0);
+        averageShown = false;
+        if (showAverageInResult) {
+          averageUs = totalReactionUs / playCount;
         }
         enterState(STATE_RESULT);
       } else if (millis() - stateEnteredMs >= GO_TIMEOUT_MS) {
@@ -121,12 +127,26 @@ void loop() {
         lcd.print("TIMEOUT");
         lcd.setCursor(0, 1);
         lcd.print("Try again");
+
+        showAverageInResult = false;
+        averageShown = false;
         enterState(STATE_RESULT);
       }
       break;
 
     case STATE_RESULT:
-      if (millis() - stateEnteredMs >= 2500) {
+      if (showAverageInResult) {
+        unsigned long elapsedMs = millis() - stateEnteredMs;
+
+        if (!averageShown && elapsedMs >= RESULT_DISPLAY_MS) {
+          displayAverage(averageUs);
+          averageShown = true;
+        }
+
+        if (averageShown && elapsedMs >= RESULT_DISPLAY_MS + AVERAGE_DISPLAY_MS) {
+          enterState(STATE_WAIT);
+        }
+      } else if (millis() - stateEnteredMs >= RESULT_DISPLAY_MS) {
         enterState(STATE_WAIT);
       }
       break;
