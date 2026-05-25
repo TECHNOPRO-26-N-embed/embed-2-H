@@ -84,6 +84,10 @@
   lastButtonStateMode  : int = HIGH
   lastButtonStateEnc   : int = HIGH
   DEBOUNCE_DELAY   : const int = 50
+
+【状態表示用LED】
+  ledStateGreen : bool = false  // 緑LEDの状態（再生中に点灯）
+  ledStateRed   : bool = false  // 赤LEDの状態（エラー時に点滅）
 ```
 
 ---
@@ -363,6 +367,12 @@
   3. 経過時間 < DEBOUNCE_DELAY（50ms）なら無視する
   4. 経過時間 >= DEBOUNCE_DELAY かつ 立下りエッジ（HIGH→LOW）なら押下確定する
   5. 押下確定時に前回確定時刻と前回状態を更新する
+【処理の流れ（例: LED状態更新）】
+  1. now = millis()
+  2. 状態に応じてLEDを制御する：
+    - currentState=2（再生中）なら緑LEDを点灯
+    - currentState=3（エラー）なら赤LEDを点滅
+    - それ以外は両方消灯
 
 【必要な変数（Section 1 に追加済みか確認）】
   lastDebounceTimeMode : unsigned long   // モードボタン前回確定時刻
@@ -429,8 +439,8 @@
 |:---|:---|:---|:---|
 | 1 | エンコーダ回転量が正しく取れているか | `readEncoder()` | `Serial.println(encoderStep);` |
 | 2 | 状態遷移が正しく起きているか | `loop()` | `Serial.println(currentState);` |
-| 3 | チャタリング処理が効いているか | `handleButton()` | `Serial.println("btn confirmed");` |
-| 4 | エンコーダ入力急変が検知できるか | `checkError()` | `Serial.println(errorCode);` |
+| 3 | 音量・音程・音色の現在値を確認する | `adjustVolume()` / `updateSoundParams()` | `Serial.println("Volume: " + volumeLevel);` |
+| 4 | エラー時の状態を確認する | `checkError()` | `Serial.println("Error: " + errorCode);` |
 
 ---
 
@@ -458,6 +468,9 @@
 | 3 | adjustVolume() + playCurrentSound() | ポテンショメータを最小/最大にして再生する | 音量が最小/最大に変化する | | [ ] |
 | 4 | handleButton() + changeMelodyPattern() + playCurrentSound() | モードボタンを押して再生する | 音色が 0→1→2→0 の順で切り替わる | | [ ] |
 | 5 | showStatusLed(3) | state=3（エラー）を渡す | 赤LEDが点滅し、緑LEDは消灯、ブザーは停止する | | [ ] |
+| 6 | showStatusLed(0) | state=0（待機中）を渡す | 緑LEDが消灯し、赤LEDも消灯する | | [ ] |
+| 7 | showStatusLed(2) | state=2（再生中）を渡す | 緑LEDが点灯し、赤LEDは消灯する | | [ ] |
+| 8 | showStatusLed(3) | state=3（エラー）を渡す | 赤LEDが点滅し、緑LEDは消灯する | | [ ] |
 
 ### 5-3. タイミング・並行動作テスト
 
@@ -509,13 +522,13 @@
 
 | No | 指摘内容 | 指摘者 | 対応 |
 |:---|:---|:---|:---|
-| 1 |  |  |  |
-| 2 |  |  |  |
+| 1 | エンコーダが何を行うか、ボタンが何を行うかの確認 | 有村さん | 【解答】質問内容だったため、解答ではエンコーダが音程、ボタンが音色（メロディ）、ポテンショメータが音量の調節を行うと回答いたしました。 |
+| 2 | 音色の変更はもともと入っている音源を利用して行うのか | 大野さん | 【解答】質問内容だったため、解答では音色がいくつか元から入っているという内容を聞いて思いついた内容なのでその様にする予定だと答えました。 |
 | 3 |  |  |  |
 
 ### 7-2. レビューを受けて変更した点
 
-- 
+- 質問内容だったため、設計自体の修正は不要と判断
 - 
 
 ---
