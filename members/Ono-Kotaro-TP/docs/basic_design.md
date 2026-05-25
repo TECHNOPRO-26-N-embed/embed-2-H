@@ -139,9 +139,25 @@
 | lastMimicInputMs | マネ最終入力時刻 | unsigned long | 4B | 0 | 3秒タイムアウト判定 |
 | isAllMatch | 一致判定結果 | bool | 1B | false | 全一致ならtrue |
 | missDetected | 1ミス検出フラグ | bool | 1B | false | 1ミス時点で不正解 |
+| compareIndex | マネ比較時の参照位置 | int | 2B | 0 | originalSeqの何番目を比較するか |
+| lastDebounceTimeKey | キー入力の前回確定時刻 | unsigned long | 4B | 0 | チャタリング対策用 |
+| lastDebounceTimeButton | 確定ボタンの前回確定時刻 | unsigned long | 4B | 0 | チャタリング対策用 |
+| lastStableInputKey | 前回確定したキー入力値 | int | 2B | 0 | 押しっぱなし誤入力対策 |
+| lastButtonStableState | 前回確定したボタン状態 | bool | 1B | false | 押しっぱなし誤入力対策 |
+
+処理用定数（実装時に定義）:
+- MAX_SEQUENCE_LENGTH = 20
+- MIMIC_TIMEOUT_MS = 3000
+- INPUT_TONE_DURATION_MS = 100
+- CORRECT_TONE_DURATION_MS = 500
+- WRONG_LED_BLINK_MS = 200
+- WRONG_LED_BLINK_COUNT = 3
+- DEBOUNCE_DELAY_MS = 50
+- ORIGINAL_MODE = 0, MIMIC_MODE = 1
+- RESULT_CORRECT = 1, RESULT_WRONG = -1, RESULT_CONTINUE = 0
 
 **SRAM使用量チェック**:
-- グローバル変数の合計: 2B (currentState) + 2B (inputKey) + 40B (originalSeq) + 2B (expectedKey) + 2B (originalLength) + 2B (mimicCount) + 4B (lastMimicInputMs) + 1B (isAllMatch) + 1B (missDetected) = **56B**
+- グローバル変数の合計: 2B (currentState) + 2B (inputKey) + 40B (originalSeq) + 2B (expectedKey) + 2B (originalLength) + 2B (mimicCount) + 4B (lastMimicInputMs) + 1B (isAllMatch) + 1B (missDetected) + 2B (compareIndex) + 4B (lastDebounceTimeKey) + 4B (lastDebounceTimeButton) + 2B (lastStableInputKey) + 1B (lastButtonStableState) = **69B**
 - Arduino UNO R3のSRAM上限（2048B）に対して十分余裕あり。
 
 ---
@@ -156,8 +172,8 @@
 | — | （共通）オリジナル確定ボタン読出 | `readOriginalEndButton()` | オリジナル入力完了ボタン（D12）の押下を取得する | なし | bool | loop()内 |
 | — | （共通）音再生 | `playMappedTone()` | 入力キーに対応した音を鳴らす | int key | なし | loop()内 |
 | F01 | 必須機能① | `playMappedTone()` | ドからシまでの音と1-8を対応させて鳴らす | int key | なし | loop()内 |
-| F02 | 必須機能② | `recordAndCompare()` | オリジナルを記録し、マネ入力のたびに1音ずつ即時比較する | int key, int mode | bool | loop()内 |
-| F03 | 必須機能③ | `judgeGameResult()` | 全一致で正解、1ミスで不正解を判定する | なし | int | loop()内 |
+| F02 | 必須機能② | `recordAndCompare()` | オリジナルを記録し、マネ入力のたびに1音ずつ即時比較する（mode: 0=ORIGINAL, 1=MIMIC） | int key, int mode | bool | loop()内 |
+| F03 | 必須機能③ | `judgeGameResult()` | 全一致で正解、1ミス/タイムアウトで不正解を判定する（1=正解, -1=不正解, 0=継続） | なし | int | loop()内 |
 | A01 | 追加機能① | `updateLcdStatus()` | 連続正解ターン数と何音目かを表示する（パラレル接続） | int turn, int index | なし | loop()内 |
 | A02 | 追加機能② | `selectDifficulty()` | 開始前に難易度を選択して各閾値を設定する | なし | int | loop()内 |
 | A03 | 追加機能③ | `updateAccuracyStats()` | 直近5ターンの正解率を計算して表示データを更新する | bool turnResult | なし | loop()内 |

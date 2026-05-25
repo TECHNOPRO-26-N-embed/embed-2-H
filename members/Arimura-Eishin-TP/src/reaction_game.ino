@@ -91,11 +91,6 @@ void loop() {
       break;
 
     case STATE_WAIT:
-      if (checkFalseStart()) {
-        enterState(STATE_MISS);
-        break;
-      }
-
       if (waitRandom()) {
         goSignalUs = micros();
         lcd.clear();
@@ -103,6 +98,9 @@ void loop() {
         lcd.print("PUSH!");
         playSound(SOUND_CUE);
         enterState(STATE_GO);
+      } else if (checkFalseStart()) {
+        // Resolve boundary timing fairly: once wait is satisfied, prioritize GO.
+        enterState(STATE_MISS);
       }
       break;
 
