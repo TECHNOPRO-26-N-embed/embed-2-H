@@ -21,8 +21,8 @@
 |:--|:--|
 | 作品タイトル | デジタルスロットマシン |
 | 状態の種類（1-2 状態遷移から） | 待機(初期数字表示)、回転中、左停止、中央停止、右停止、全停止・判定、リーチ演出（任意）、当選音再生、結果表示待機 |
-| 実装する関数の数（2-2 関数一覧から） | 10個 |
-| グローバル変数の合計バイト数（2-1 SRAM確認から） | 40B |
+| 実装する関数の数（2-2 関数一覧から） | 13個 |
+| グローバル変数の合計バイト数（2-1 SRAM確認から） | 49B |
 
 ---
 
@@ -35,8 +35,10 @@
 【ピン定義】（basic_design.md 3-1 から転記）
 	btnPins[3]     : constexpr uint8_t配列 = {4,5,6}
 	buzzerPin      : constexpr uint8_t = 9
-	displayClkPin  : constexpr uint8_t = 2
-	displayDioPin  : constexpr uint8_t = 3
+	displayDataPin : constexpr uint8_t = 2
+	displayClockPin: constexpr uint8_t = 3
+	displayLatchPin: constexpr uint8_t = 7
+	digitPins[4]   : constexpr uint8_t配列 = {8,10,A0,A1}
 
 【状態管理】（basic_design.md 1-2 の状態名から転記）
 	SlotState(enum)    : enum class SlotState : uint8_t
@@ -59,6 +61,9 @@
 【その他のフラグ・カウンター】
 	slotDigits[3]    : uint8_t配列 = {0,0,0}
 	slotStopped[3]   : bool配列 = {false,false,false}
+	displayDigits[4] : uint8_t配列 = {BLANK,0,0,0}
+	currentDisplayIndex : uint8_t = 0
+	lastDisplayMuxMs : uint32_t = 0
 	reachEnabled     : bool = true
 	isReach          : bool = false
 	reachSlotIndex   : int8_t = -1
@@ -83,10 +88,11 @@
 1. ピンモードを設定する
 	 - btnPins[0..2] → INPUT_PULLUP
 	 - buzzerPin     → OUTPUT
-	 - displayClkPin/displayDioPin → OUTPUT
+	 - displayDataPin/displayClockPin/displayLatchPin → OUTPUT
+	 - digitPins[0..3] → OUTPUT
 
 2. ライブラリの初期化（使うものだけ）
-	 - 4桁ディスプレイ初期化
+	 - 74HC595初期化（初期セグメントOFF、桁選択OFF）
 
 3. 状態変数を初期化
 	 - currentState = STATE_WAIT
@@ -317,12 +323,68 @@
 
 ```
 【処理の流れ】
-1. slotDigits[0..2] を表示用データへ変換
-2. 4桁ディスプレイ右3桁に反映
-3. 左1桁は空白または固定記号を表示
+1. slotDigits[0..2] を表示バッファ displayDigits[1..3] に反映
+2. 左1桁 displayDigits[0] は空白に設定
+3. 実際の点灯は refreshDisplayTick() の多重化で行う
 
 【エラー・異常ケース】
 - 異常な値が来た場合: 範囲外値は0〜9へ補正して表示
+```
+
+---
+
+### `refreshDisplayTick()` — 74HC595+桁選択で多重化表示を1ステップ進める
+
+**basic_design.md 2-2 との対応：** 74HC595と桁選択トランジスタで2ms周期の多重化表示を行う
+
+**引数：** なし
+
+**戻り値：** void
+
+```
+【処理の流れ】
+1. now = millis() を取得し、前回から2ms未満なら何もしない
+2. 4桁選択線をいったん全OFFにする（ゴースト防止）
+3. currentDisplayIndex の表示値からセグメントパターンを作成
+4. outputSegments(pattern) で74HC595へ8bit出力
+5. currentDisplayIndex の桁だけONにする
+6. currentDisplayIndex を次桁へ進める（0→1→2→3→0）
+
+【エラー・異常ケース】
+- 異常な値が来た場合: 不正値は空白パターンで表示継続
+```
+
+---
+
+### `outputSegments(pattern)` — 74HC595へセグメントデータを書き込む
+
+**basic_design.md 2-2 との対応：** 74HC595へ8bitのセグメントパターンを書き込む
+
+**引数：** `pattern`（uint8_t）
+
+**戻り値：** void
+
+```
+【処理の流れ】
+1. ST_CP（ラッチ）をLOWにする
+2. DS/SH_CPで8bitをシフト出力する
+3. ST_CPをHIGHにして出力を反映する
+```
+
+---
+
+### `disableAllDigits()` — 桁選択線をすべてOFFにする
+
+**basic_design.md 2-2 との対応：** 4桁選択線をすべてOFFにしてゴースト点灯を防ぐ
+
+**引数：** なし
+
+**戻り値：** void
+
+```
+【処理の流れ】
+1. digitPins[0..3] をすべてOFFレベルに設定する
+2. 次の桁点灯まで全桁非選択を維持する
 ```
 
 ---
@@ -344,6 +406,60 @@
 
 【エラー・異常ケース】
 - 異常な値が来た場合: pinが対象外ならfalseを返す
+```
+
+---
+
+### `clampDigit(value)` — 数字を0〜9の範囲に補正して返す
+
+**basic_design.md 2-2 との対応：** 数字が0〜9の範囲を超えた場合に範囲内へ補正して返す
+
+**引数：** `value`（uint8_t）: 補正対象の数字
+
+**戻り値：** uint8_t
+
+```
+【処理の流れ】
+1. value が 9 以下ならそのまま返す
+2. value が 9 を超える場合は 9 を返す
+3. 異常値が混入しないよう、呼び出し側で判定前・表示前に使用する
+
+【エラー・異常ケース】
+- 異常な値が来た場合: 0〜9の範囲に収まる値を返して処理継続
+```
+
+---
+
+### `playReachCue()` — リーチ時の効果音を鳴らす
+
+**basic_design.md 2-2 との対応：** リーチ時に短い効果音（リーチ音）をブザーで鳴らす
+
+**引数：** なし
+
+**戻り値：** なし
+
+```
+【処理の流れ】
+1. tone(buzzerPin, 1000, 200) などで短い単音を鳴らす
+2. delayで音が鳴り終わるまで待つ
+3. noTone(buzzerPin)で停止
+```
+
+---
+
+### `playWinSound()` — 当選時のメロディを鳴らす
+
+**basic_design.md 2-2 との対応：** 3桁一致時に当選メロディをブザーで鳴らす
+
+**引数：** なし
+
+**戻り値：** なし
+
+```
+【処理の流れ】
+1. 複数音階（例: E6, G6, A6, C7）を順にtoneで鳴らす
+2. 各音の間にdelayを挟む
+3. noTone(buzzerPin)で停止
 ```
 
 ---
