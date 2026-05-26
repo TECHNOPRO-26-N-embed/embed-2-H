@@ -22,7 +22,7 @@
 | 作品タイトル | 反射神経を測ろうゲーム |
 | 状態の種類（1-2 状態遷移から） | 開始待ち / READY表示 / 待機状態 / 合図状態 / 結果状態 / 失敗状態 |
 | 実装する関数の数（2-2 関数一覧から） | 11個 |
-| グローバル変数の合計バイト数（2-1 SRAM確認から） | 約36B |
+| グローバル変数の合計バイト数（2-1 SRAM確認から） | 約55B（現行コードの可変グローバル概算） |
 
 ---
 
@@ -33,14 +33,14 @@
 
 ```
 【ピン定義】（basic_design.md 3-1 から転記）
-  PIN_BUTTON   = 9    // タクトスイッチ（INPUT_PULLUP）
+  PIN_BUTTON   = 2    // タクトスイッチ（INPUT_PULLUP）
   PIN_BUZZER   = 8    // パッシブブザー
   PIN_LCD_RS   = 7
   PIN_LCD_E    = 6
-  PIN_LCD_D4   = 5
-  PIN_LCD_D5   = 4
-  PIN_LCD_D6   = 3
-  PIN_LCD_D7   = 2
+  PIN_LCD_D4   = 9
+  PIN_LCD_D5   = 10
+  PIN_LCD_D6   = 11
+  PIN_LCD_D7   = 12
 
 【状態管理】（basic_design.md 1-2 の状態名から転記）
   currentState   : int = 0   // 0:開始待ち 1:READY表示 2:待機 3:合図 4:結果 5:失敗
@@ -56,6 +56,14 @@
   bestTimeUs     : unsigned long = 4294967295
   totalReactionUs: unsigned long = 0
   playCount      : unsigned long = 0
+  averageUs      : unsigned long = 0
+  lastResultReactionUs : unsigned long = 0
+  resultRefreshAtMs    : unsigned long = 0
+
+【結果表示制御】
+  showAverageInResult : bool = false
+  averageShown        : bool = false
+  needsResultRefresh  : bool = false
 
 【ボタン入力（デバウンス）】
   stableButtonLevel : bool = HIGH
@@ -66,6 +74,8 @@
 【表示/遷移制御】
   READY_DISPLAY_MS  : const unsigned long = 800
   GO_TIMEOUT_MS     : const unsigned long = 3000
+  RESULT_DISPLAY_MS : const unsigned long = 2000
+  AVERAGE_DISPLAY_MS: const unsigned long = 2000
 ```
 
 ---
@@ -113,7 +123,7 @@
 
 ＜currentState が STATE_READY（READY表示）のとき＞
   - READY表示を一定時間表示
-  - 時間経過で STATE_WAIT へ遷移
+  - 0.8秒経過後、ボタン押下で STATE_WAIT へ遷移
 
 ＜currentState が STATE_WAIT（待機）のとき＞
   - waitRandom() が成立したら合図を出して STATE_GO へ遷移
@@ -128,10 +138,11 @@
   - 一定時間押下なしなら TIMEOUT 表示して STATE_RESULT へ遷移
 
 ＜currentState が STATE_RESULT（結果表示）のとき＞
-  - 一定時間経過で STATE_WAIT へ遷移
+  - Time/Best を2秒表示し、Average を2秒表示（表示対象がある場合）
+  - 表示シーケンス完了後に STATE_READY へ遷移
 
 ＜currentState が STATE_MISS（失敗）のとき＞
-  - 一定時間経過で STATE_WAIT へ遷移
+  - 1.5秒経過後、ボタン押下で STATE_READY へ遷移
 ```
 
 ---
@@ -297,12 +308,16 @@
 
 ```
 【処理の流れ】
-1. soundType に応じて tone(PIN_BUZZER, 周波数, 長さ) を呼ぶ
-2. CUE / MISS / BEST の3種類を使い分ける
+1. BUZZER_PIN と LCD_E_PIN が同一の場合は何もせず終了する（表示破損回避）
+2. soundType に応じて tone(PIN_BUZZER, 周波数, 長さ) を呼ぶ
+3. CUE / MISS / BEST の3種類を使い分ける
+4. BEST は短い3音メロディー（例: 1319Hz → 1568Hz → 2093Hz）を鳴らす
 
 【エラー・異常ケース】
 - 未定義 soundType:
   何も鳴らさず終了する
+- ブザーとLCD Enableが同一ピンの場合:
+  効果音を無効化してLCD表示破損を防ぐ
 ```
 
 ---
@@ -366,17 +381,22 @@
 
 【処理の流れ】
   1. now = millis()
-  2. READY状態: now - stateEnteredMs >= READY_DISPLAY_MS で遷移
+  2. READY状態: now - stateEnteredMs >= READY_DISPLAY_MS かつボタン押下で遷移
   3. WAIT状態: now - waitStartedMs >= randomWaitMs で合図へ
   4. GO状態: now - stateEnteredMs >= GO_TIMEOUT_MS でTIMEOUT表示
-  5. RESULT/MISS状態: 経過時間で待機へ戻す
+  5. RESULT状態: RESULT_DISPLAY_MS と AVERAGE_DISPLAY_MS の2段階で表示後、READYへ戻す
+  6. MISS状態: 1.5秒経過後、ボタン押下でREADYへ戻す
 
 【自分のシステムで millis() を使う処理】
   - READY表示時間管理
   - ランダム待機成立判定
   - 待機成立境界では GO 遷移を優先（waitRandom未成立時のみフライング判定）
   - GOタイムアウト判定
-  - RESULT/MISSの表示時間管理
+  - RESULTの2段階表示管理（Time/Best→Average）
+  - MISSからの復帰待ち管理
+
+【補足】
+  - SOUND_BEST の3音メロディーは視認性を優先し、短い delay を使って区切っている。
 ```
 
 ---
@@ -436,10 +456,10 @@
 
 | No | テスト内容 | テスト手順 | 期待する結果 | 実際の結果 | 合否 |
 |:---|:---|:---|:---|:---|:---|
-| 1 | READY表示時間 | 起動後ボタンを押す | 約0.8秒で WAIT へ遷移 | | [ ] |
+| 1 | READY表示時間 | 起動後0.8秒待ってボタンを押す | 0.8秒経過前は遷移せず、押下後に WAIT へ遷移 | | [ ] |
 | 2 | GOタイムアウト | 合図後に押さない | TIMEOUT表示後に RESULT へ遷移 | | [ ] |
-| 3 | RESULT/MISS復帰 | 結果表示・失敗表示後に待つ | 一定時間後に WAIT へ戻る | | [ ] |
-| 4 | 平均表示 | 3回以上プレイする | 平均値が更新されて表示される | | [ ] |
+| 3 | RESULT/MISS復帰 | 結果表示シーケンス完了、またはMISS後1.5秒経過で押下 | RESULTは自動でREADYへ、MISSは押下でREADYへ戻る | | [ ] |
+| 4 | 平均表示 | 3回以上プレイする | Time/Bestを2秒表示後、Averageを2秒表示する | | [ ] |
 | 5 | WAIT境界押下 | randomWaitMs 到達直前/到達ちょうどで押下する | 直前はMISS、到達ちょうどはGOとして扱われる | | [ ] |
 
 ---
@@ -493,8 +513,8 @@
 | No | 指摘内容 | 指摘者 | 対応 |
 |:---|:---|:---|:---|
 | 1 | 反射神経が良すぎてランダム待機時間が変わったタイミングでフライングになってしまう可能性があるとは思うのだがその対応は？ | Mr.Ono | WAIT中の判定順を変更し、waitRandom成立時はGO遷移を優先。waitRandom未成立時のみフライング判定を実行する仕様に修正 |
-| 2 |  |  |  |
-| 3 |  |  |  |
+| 2 | なし | - | なし |
+| 3 | なし | - | なし |
 
 ### 7-2. レビューを受けて変更した点
 
@@ -504,4 +524,4 @@
 
 ---
 
-*初版: 2026-05-25 / AIレビュー: 2026-05-25 / グループレビュー後更新: 2026-05-25*
+*初版: 2026-05-25 / AIレビュー: 2026-05-25 / グループレビュー後更新: 2026-05-26*
