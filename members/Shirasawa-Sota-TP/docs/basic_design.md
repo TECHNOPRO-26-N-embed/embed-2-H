@@ -126,19 +126,24 @@
 | playCount | プレイ回数 | uint16_t | 2 | 0 | 統計表示用（任意） |
 | btnPins[3] | 左・中・右ボタンのピン番号 | constexpr uint8_t配列 | 0 | {4,5,6} | constexprでSRAM未使用 |
 | buzzerPin | ブザー接続ピン番号 | constexpr uint8_t | 0 | 9 | constexprでSRAM未使用 |
-| displayClkPin | 4桁ディスプレイCLKピン番号 | constexpr uint8_t | 0 | 2 | constexprでSRAM未使用 |
-| displayDioPin | 4桁ディスプレイDIOピン番号 | constexpr uint8_t | 0 | 3 | constexprでSRAM未使用 |
+| displayDataPin | 74HC595 DS(SER)接続ピン | constexpr uint8_t | 0 | 2 | constexprでSRAM未使用 |
+| displayClockPin | 74HC595 SH_CP(SRCLK)接続ピン | constexpr uint8_t | 0 | 3 | constexprでSRAM未使用 |
+| displayLatchPin | 74HC595 ST_CP(RCLK)接続ピン | constexpr uint8_t | 0 | 7 | constexprでSRAM未使用 |
+| digitPins[4] | 4桁選択トランジスタ制御ピン | constexpr uint8_t配列 | 0 | {8,10,A0,A1} | constexprでSRAM未使用 |
+| displayDigits[4] | 表示バッファ（左端空白+右3桁） | uint8_t配列 | 4 | {BLANK,0,0,0} | 多重化表示で参照 |
+| currentDisplayIndex | 現在点灯中の桁番号 | uint8_t | 1 | 0 | 0〜3を巡回 |
+| lastDisplayMuxMs | 前回の桁切替時刻 | uint32_t | 4 | 0 | 2ms周期で多重化 |
 
 > [!CAUTION]
 > **SRAM使用量チェック（Arduino UNO R3 の上限は 2048B）**
 >
-> グローバル変数の合計（上表のSRAM使用分）: **40 B**
+> グローバル変数の合計（上表のSRAM使用分）: **49 B**
 >
-> 計算: 3+3+1+1+1+4+12+3+3+1+1+1+1+1+2+2 = 40
+> 計算: 3+3+1+1+1+4+12+3+3+4+1+4+1+1+1+1+1+2+2 = 49
 >
 > | 合計バイト数 | 判定 |
 > |:--|:--|
-> | 40B / 2048B（約2.0%） | ✅ 余裕あり |
+> | 49B / 2048B（約2.4%） | ✅ 余裕あり |
 >
 > 備考: 上記は「設計上の主要グローバル変数」の見積り。実装時はライブラリ内部ワーク領域やローカル変数（スタック）を加味しても、現時点の設計規模では上限超過リスクは低い。文字列リテラルは`F()`マクロでフラッシュ配置を徹底するとさらに安全。
 
@@ -153,8 +158,14 @@
 | `handleButtonPress()` | 立ち下がり押下を検知し、1ループ1入力のみ有効化して該当スロット停止または再スタートを行う（リーチ演出中は本関数で入力処理しない）。同時押しは左→中央→右の走査順で最初の1入力を採用。1桁停止時は左/中央/右停止へ更新し、2桁停止時は残り1桁が回転中（currentStateは回転中扱い）、3桁停止時はisSpinning=falseで全停止・判定へ遷移 | なし | なし |
 | `checkHitAndPlaySound()` | 全停止後に3桁一致を判定し、一致時は当選音再生状態へ遷移させる | なし | bool（アタリ可否） |
 | `checkReachAndPlayCue()` | 2桁一致(リーチ)を判定し、任意機能ON時にリーチ音を再生 | なし | bool（リーチ可否） |
+| `playReachCue()` | リーチ時に短い効果音（リーチ音）をブザーで再生する | なし | なし |
+| `playWinSound()` | 3桁一致時に当選メロディをブザーで再生する | なし | なし |
 | `spinLastSlotForReach()` | リーチ演出専用の入力処理を行い、任意ボタン押下で未一致1桁の回転を開始（stoppedCount=2）し、対応ボタン押下で停止（stoppedCount=3）して再判定へ進める | なし | なし |
 | `renderDisplay()` | 現在の3スロット値を4桁ディスプレイに反映 | なし | なし |
+| `refreshDisplayTick()` | 74HC595と桁選択トランジスタで2ms周期の多重化表示を行う | なし | なし |
+| `outputSegments(pattern)` | 74HC595へ8bitのセグメントパターンを書き込む | uint8_t pattern | なし |
+| `disableAllDigits()` | 4桁選択線をすべてOFFにしてゴースト点灯を防ぐ | なし | なし |
+| `clampDigit(value)` | 数字が0〜9の範囲を超えた場合に範囲内へ補正して返す | uint8_t value | uint8_t |
 | `isDebouncedPress(pin)` | 指定ボタンのデバウンス済み押下イベントを返す | int pin | bool |
 
 ### 2-3. タイミング設計（delay vs millis）
@@ -178,17 +189,21 @@
 | ボタン(左) | プッシュボタン | D4 | 入力 | INPUT_PULLUP使用、押下でLOW |
 | ボタン(中央) | プッシュボタン | D5 | 入力 | INPUT_PULLUP使用、押下でLOW |
 | ボタン(右) | プッシュボタン | D6 | 入力 | INPUT_PULLUP使用、押下でLOW |
-| 4桁ディスプレイ | TM1637系4桁7セグ | D2(CLK), D3(DIO) | 出力 | 右3桁をスロット表示に使用 |
+| 4桁7セグメントLED | 共通カソード/アノード | 74HC595経由: D2(DS), D3(SH_CP), D7(ST_CP)／桁選択: D8, D10, A0, A1 | 出力 | 74HC595でセグメント制御、4本の桁選択ピンで多重化。抵抗・トランジスタ要。 |
+| 74HC595 | シフトレジスタ | D2(DS), D3(SH_CP), D7(ST_CP) | 出力 | Q0-Q7→a,b,c,d,e,f,g,dp。OE=GND, MR=5V固定。 |
+| 桁選択トランジスタ | NPN/PNP | D8, D10, A0, A1 | 出力 | 各桁の共通端子をON/OFF。1kΩベース抵抗経由。 |
 | パッシブブザー | 圧電ブザー | D9 | 出力 | tone()で当選音を出力 |
 
 > [!TIP]
-> D0/D1はシリアル通信用に予約し使用しない。D2〜D6, D9のためピン競合なし。
+> D0/D1はシリアル通信用に予約し使用しない。D2/D3/D4/D5/D6/D7/D8/D9/D10/A0/A1を使うが、ピン競合なし。
 
 ### 3-2. 電気的考慮事項
 
 | 用途 | 計算・メモ |
 |:--|:--|
 | ボタン入力安定化 | 内蔵プルアップを使うため外付け抵抗不要 |
+| 7セグ電流制限 | a〜g,dpの各線に220〜330Ωの直列抵抗を入れる |
+| 7セグ桁切替 | 4桁共通端子はトランジスタで切替（ベース抵抗1kΩ目安） |
 | ブザー保護 | 小型パッシブブザーを想定。必要時は100〜220Ω直列抵抗を追加 |
 | その他 | GND共通化。ボタンは片端GND、片端を各入力ピンに接続 |
 
@@ -212,13 +227,13 @@
 
 | No | 必須機能（requirements.md 3-1 から転記） | 対応するSW設計（関数名等、basic_design.md 2-2から転記） | 対応するHW設計（ピン等、basic_design.md 3-1から転記） | 結合テスト No |
 |:---|:---|:---|:---|:---|
-| 1 | ボタンが押されるまで0～9の数字を高速で表示（スロットの回転） | 2-2（関数: `loop()`, `updateSpinningDigits()`, `renderDisplay()`） | 3-1（4桁ディスプレイ: D2(CLK), D3(DIO)） | テスト#1 |
-| 2 | スロットは3つ、4桁ディスプレイの右3桁に左/中/右を表示できる | 2-2（関数: `renderDisplay()`） | 3-1（4桁ディスプレイ: D2(CLK), D3(DIO)） | テスト#2 |
+| 1 | ボタンが押されるまで0～9の数字を高速で表示（スロットの回転） | 2-2（関数: `loop()`, `updateSpinningDigits()`, `renderDisplay()`, `refreshDisplayTick()`） | 3-1（74HC595: D2(DS), D3(SH_CP), D7(ST_CP) / 桁選択: D8,D10,A0,A1） | テスト#1 |
+| 2 | スロットは3つ、4桁ディスプレイの右3桁に左/中/右を表示できる | 2-2（関数: `renderDisplay()`, `refreshDisplayTick()`, `outputSegments()`） | 3-1（74HC595: D2(DS), D3(SH_CP), D7(ST_CP) / 桁選択: D8,D10,A0,A1） | テスト#2 |
 | 3 | 左/中央/右ボタンで対応するスロットを停止できる | 2-2（関数: `handleButtonPress()`, `isDebouncedPress(pin)`） | 3-1（ボタン: D4, D5, D6） | テスト#3 |
 | 4 | 数字が揃ったとき（アタリ）に音を鳴らす | 2-2（関数: `checkHitAndPlaySound()`） | 3-1（パッシブブザー: D9） | テスト#4 |
-| 5 | 全スロット停止後、任意ボタン押下で再度回転できる | 2-2（関数: `startSpin()`, `handleButtonPress()`） | 3-1（ボタン: D4, D5, D6 / 4桁ディスプレイ: D2, D3） | テスト#5 |
-| 6 | 電源ON時に任意数字を表示し、ボタン押下で回転開始できる | 2-2（関数: `setup()`, `startSpin()`, `loop()`） | 3-1（ボタン: D4, D5, D6 / 4桁ディスプレイ: D2, D3） | テスト#6 |
-| 7 | スロット回転時は0.05秒ごとに数字を切り替える | 2-2（関数: `updateSpinningDigits()`） / 2-3（50ms周期設計） | 3-1（4桁ディスプレイ: D2(CLK), D3(DIO)） | テスト#7 |
+| 5 | 全スロット停止後、任意ボタン押下で再度回転できる | 2-2（関数: `startSpin()`, `handleButtonPress()`） | 3-1（ボタン: D4, D5, D6 / 74HC595: D2,D3,D7 / 桁選択: D8,D10,A0,A1） | テスト#5 |
+| 6 | 電源ON時に任意数字を表示し、ボタン押下で回転開始できる | 2-2（関数: `setup()`, `startSpin()`, `loop()`, `refreshDisplayTick()`） | 3-1（ボタン: D4, D5, D6 / 74HC595: D2,D3,D7 / 桁選択: D8,D10,A0,A1） | テスト#6 |
+| 7 | スロット回転時は0.05秒ごとに数字を切り替える | 2-2（関数: `updateSpinningDigits()`） / 2-3（50ms周期設計） | 3-1（74HC595: D2(DS), D3(SH_CP), D7(ST_CP) / 桁選択: D8,D10,A0,A1） | テスト#7 |
 
 ---
 

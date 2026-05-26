@@ -1,14 +1,14 @@
 #include <LiquidCrystal.h>
 
-// Hardware settings
-const int BUTTON_PIN = 9;   // INPUT_PULLUP: pressed = LOW
-const int BUZZER_PIN = 8;
+// ハードウェア設定
+const int BUTTON_PIN = 2;   // INPUT_PULLUP: 押下時 = LOW
+const int BUZZER_PIN = 6;
 const int LCD_RS_PIN = 7;
-const int LCD_E_PIN = 6;
-const int LCD_D4_PIN = 5;
-const int LCD_D5_PIN = 4;
-const int LCD_D6_PIN = 3;
-const int LCD_D7_PIN = 2;
+const int LCD_E_PIN = 8;
+const int LCD_D4_PIN = 9;
+const int LCD_D5_PIN = 10;
+const int LCD_D6_PIN = 11;
+const int LCD_D7_PIN = 12;
 
 LiquidCrystal lcd(LCD_RS_PIN, LCD_E_PIN, LCD_D4_PIN, LCD_D5_PIN, LCD_D6_PIN, LCD_D7_PIN);
 
@@ -29,31 +29,34 @@ enum SoundType {
 
 GameState currentState = STATE_IDLE;
 
-// Time management
+// 時間管理
 unsigned long stateEnteredMs = 0;
 unsigned long waitStartedMs = 0;
 unsigned long randomWaitMs = 0;
 unsigned long goSignalUs = 0;
 
-// Score data
+// スコア管理
 unsigned long reactionTimeUs = 0;
 unsigned long bestTimeUs = 4294967295UL;
 unsigned long totalReactionUs = 0;
 unsigned long playCount = 0;
 unsigned long averageUs = 0;
+unsigned long lastResultReactionUs = 0;
+unsigned long resultRefreshAtMs = 0;
 
 bool showAverageInResult = false;
 bool averageShown = false;
+bool needsResultRefresh = false;
 
-// Button debounce
+// ボタンのデバウンス
 bool stableButtonLevel = HIGH;
 bool lastRawLevel = HIGH;
 unsigned long lastDebounceMs = 0;
 const unsigned long DEBOUNCE_MS = 50;
 const unsigned long GO_TIMEOUT_MS = 3000;
 const unsigned long READY_DISPLAY_MS = 800;
-const unsigned long RESULT_DISPLAY_MS = 1200;
-const unsigned long AVERAGE_DISPLAY_MS = 1200;
+const unsigned long RESULT_DISPLAY_MS = 2000;
+const unsigned long AVERAGE_DISPLAY_MS = 2000;
 
 void setup();
 void loop();
@@ -67,6 +70,7 @@ void playSound(int soundType);
 void displayAverage(unsigned long avgUs);
 void enterState(GameState next);
 
+// ハードウェアを初期化し、初期画面を表示する。
 void setup() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(BUZZER_PIN, OUTPUT);
@@ -76,43 +80,57 @@ void setup() {
   enterState(STATE_IDLE);
 }
 
+// 状態マシンを1ステップ実行する。
 void loop() {
   switch (currentState) {
+    // 初期待機: スタート押下で READY へ。
     case STATE_IDLE:
       if (readButton()) {
         enterState(STATE_READY);
       }
       break;
 
+    // READY表示中: 表示時間経過後の押下で WAIT へ。
     case STATE_READY:
-      if (millis() - stateEnteredMs >= READY_DISPLAY_MS) {
+      if (millis() - stateEnteredMs >= READY_DISPLAY_MS && readButton()) {
         enterState(STATE_WAIT);
       }
       break;
 
+    // ランダム待機: 待機完了で GO、先押しで MISS。
     case STATE_WAIT:
       if (waitRandom()) {
         goSignalUs = micros();
         lcd.clear();
         lcd.setCursor(0, 0);
-        lcd.print("PUSH!");
+        lcd.print("PUSH!           ");
+        lcd.setCursor(0, 1);
+        lcd.print("                ");
         playSound(SOUND_CUE);
         enterState(STATE_GO);
       } else if (checkFalseStart()) {
-        // Resolve boundary timing fairly: once wait is satisfied, prioritize GO.
+        // 境界時刻では公平性を保つため、待機成立時はGOを優先する。
         enterState(STATE_MISS);
       }
       break;
 
+    // 合図後の計測状態: 押下で記録、時間切れで TIMEOUT 扱い。
     case STATE_GO:
       if (readButton()) {
         reactionTimeUs = measureReaction();
         bool isBest = updateBest(reactionTimeUs);
+        lastResultReactionUs = reactionTimeUs;
         displayResult(reactionTimeUs);
         if (isBest) {
           playSound(SOUND_BEST);
+          if (LCD_E_PIN == BUZZER_PIN) {
+            // ピン共有時はtone中にLCDが乱れるため、終了後に再描画する。
+            needsResultRefresh = true;
+            resultRefreshAtMs = millis() + 160;
+          }
         }
 
+        // 平均表示に使うデータをこの時点で確定する。
         showAverageInResult = (playCount > 0);
         averageShown = false;
         if (showAverageInResult) {
@@ -128,11 +146,18 @@ void loop() {
 
         showAverageInResult = false;
         averageShown = false;
+        needsResultRefresh = false;
         enterState(STATE_RESULT);
       }
       break;
 
+    // 結果表示: Time/Best 表示後、Average を表示して READY へ戻る。
     case STATE_RESULT:
+      if (needsResultRefresh && (long)(millis() - resultRefreshAtMs) >= 0) {
+        displayResult(lastResultReactionUs);
+        needsResultRefresh = false;
+      }
+
       if (showAverageInResult) {
         unsigned long elapsedMs = millis() - stateEnteredMs;
 
@@ -142,21 +167,23 @@ void loop() {
         }
 
         if (averageShown && elapsedMs >= RESULT_DISPLAY_MS + AVERAGE_DISPLAY_MS) {
-          enterState(STATE_WAIT);
+          enterState(STATE_READY);
         }
       } else if (millis() - stateEnteredMs >= RESULT_DISPLAY_MS) {
-        enterState(STATE_WAIT);
+        enterState(STATE_READY);
       }
       break;
 
+    // フライング表示: 1.5秒後の押下で READY へ。
     case STATE_MISS:
-      if (millis() - stateEnteredMs >= 1500) {
-        enterState(STATE_WAIT);
+      if (millis() - stateEnteredMs >= 1500 && readButton()) {
+        enterState(STATE_READY);
       }
       break;
   }
 }
 
+// デバウンス付きのボタン入力。押下イベントごとに1回だけtrueを返す。
 bool readButton() {
   bool raw = digitalRead(BUTTON_PIN);
 
@@ -175,19 +202,27 @@ bool readButton() {
   return false;
 }
 
+// GO合図からの反応時間をマイクロ秒で計測する。
 unsigned long measureReaction() {
   return micros() - goSignalUs;
 }
 
+// ランダム待機時間が経過したかを判定する。
 bool waitRandom() {
   return (millis() - waitStartedMs) >= randomWaitMs;
 }
 
+// 現在の反応時間とベスト記録をLCDに表示する。
 void displayResult(unsigned long reactionUs) {
   unsigned long reactionMs = reactionUs / 1000;
   unsigned long bestMs = bestTimeUs / 1000;
 
   lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("                ");
+  lcd.setCursor(0, 1);
+  lcd.print("                ");
+
   lcd.setCursor(0, 0);
   lcd.print("Time:");
   lcd.print(reactionMs);
@@ -199,6 +234,7 @@ void displayResult(unsigned long reactionUs) {
   lcd.print("ms");
 }
 
+// ベスト・合計・回数を更新し、今回が新記録かを返す。
 bool updateBest(unsigned long reactionUs) {
   bool isBest = reactionUs < bestTimeUs;
 
@@ -212,23 +248,41 @@ bool updateBest(unsigned long reactionUs) {
   return isBest;
 }
 
+// WAIT状態中の押下をフライングとして検出する。
 bool checkFalseStart() {
   return readButton();
 }
 
+// 合図・ミス・ベスト更新時の効果音を鳴らす。
 void playSound(int soundType) {
+  // ブザーとLCDのEを共有するとtone()で表示が乱れるためスキップする。
+  if (BUZZER_PIN == LCD_E_PIN) {
+    return;
+  }
+
   if (soundType == SOUND_CUE) {
     tone(BUZZER_PIN, 1760, 120);
   } else if (soundType == SOUND_MISS) {
     tone(BUZZER_PIN, 330, 250);
   } else if (soundType == SOUND_BEST) {
-    tone(BUZZER_PIN, 1319, 120);
+    // お祝いメロディー（ミ -> ソ -> 高いド）
+    tone(BUZZER_PIN, 1319, 110);
+    delay(130);
+    tone(BUZZER_PIN, 1568, 110);
+    delay(130);
+    tone(BUZZER_PIN, 2093, 180);
   }
 }
 
+// 平均反応時間をLCDに表示する。
 void displayAverage(unsigned long avgUs) {
   unsigned long avgMs = avgUs / 1000;
   lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("                ");
+  lcd.setCursor(0, 1);
+  lcd.print("                ");
+
   lcd.setCursor(0, 0);
   lcd.print("Average:");
   lcd.setCursor(0, 1);
@@ -236,9 +290,14 @@ void displayAverage(unsigned long avgUs) {
   lcd.print("ms");
 }
 
+// 次の状態へ遷移し、その状態に対応するLCD表示へ更新する。
 void enterState(GameState next) {
   currentState = next;
   stateEnteredMs = millis();
+
+  if (next != STATE_RESULT) {
+    needsResultRefresh = false;
+  }
 
   if (next == STATE_IDLE) {
     lcd.clear();
