@@ -21,16 +21,17 @@
 |:--|:--|
 | 作品タイトル | 音マネゲーム |
 | 状態の種類（1-2 状態遷移から） | オリジナル入力待機、オリジナル入力記録、マネ入力待機、一致判定、正解通知、不正解通知 |
-| 実装する関数の数（2-2 関数一覧から） | 10個 |
-| グローバル変数の合計バイト数（2-1 SRAM確認から） | 69B（可変グローバル変数のみ） |
+| 実装する関数の数（2-2 関数一覧から） | 11個 |
+| グローバル変数の合計バイト数（2-1 SRAM確認から） | 71B（可変グローバル変数のみ） |
 
 ### 0-1. 想定フローとの一致確認（今回更新）
 
-- 一致: オリジナル入力（最大20音）を記録し、完了ボタンで確定する。
+- 一致: オリジナル入力（最大20音）を記録し、keypadの「0」で確定する。
 - 一致: マネ側は1音入力ごとに即時比較する（入力確定ボタンは使わない）。
 - 一致: 1音でも不一致ならそのターンを終了し、赤LED通知へ遷移する。
 - 一致: すべて一致して記録キューを消化し、かつ missDetected=false なら成功とする。
-- 更新: 不正解通知は「赤LEDの点滅」ではなく「赤LED点灯（ターン終了通知）」として扱う。
+- 一致: 不正解通知は赤LEDを0.2秒 x 3回点滅させる。
+- 追加: オリジナル入力待機中にモード切替ボタンを押すと、デフォルト曲を比較元としてマネ入力フェーズへ遷移できる。
 - 更新: 成功/失敗通知後は次ターンのために状態を初期化し、STATE_ORIGINAL_WAIT に戻る。
 
 ---
@@ -54,7 +55,7 @@
 | PIN_KEY_8 | 2 | キー8入力ピン |
 | PIN_BUZZER | 10 | 圧電ブザー出力ピン |
 | PIN_LED_RED | 11 | 不正解通知用LED出力ピン |
-| PIN_ORIGINAL_END_BUTTON | 12 | オリジナル入力完了ボタン入力ピン（INPUT_PULLUP） |
+| PIN_ORIGINAL_END_BUTTON | 12 | デフォルト曲モード切替ボタン入力ピン（INPUT_PULLUP） |
 
 ### 1-2. 音定義（キー番号との対応）
 
@@ -85,7 +86,7 @@
 
 | 名前 | 型 | 初期値 | 意味 |
 |:--|:--|:--|:--|
-| inputKey | int | 0 | 今ループで検出した入力キー（1-8、無効は0） |
+| inputKey | int | 0 | 今ループで検出した入力キー（1-8、turn切替は9、無効は0） |
 | originalSeq | int[20]相当 | 空 | オリジナル側で入力した音列（最大20） |
 | expectedKey | int | 0 | 比較時に参照する期待キー |
 | originalLength | int | 0 | 記録済み音列の長さ |
@@ -95,9 +96,10 @@
 | isAllMatch | bool | false | 全一致が成立したか |
 | missDetected | bool | false | 不一致が1回でも発生したか |
 | lastDebounceTimeKey | unsigned long | 0 | キー入力が最後に確定した時刻 |
-| lastDebounceTimeButton | unsigned long | 0 | 完了ボタンが最後に確定した時刻 |
+| lastDebounceTimeButton | unsigned long | 0 | モード切替ボタンが最後に確定した時刻 |
 | lastStableInputKey | int | 0 | 直近の安定キー状態 |
 | lastButtonStableState | bool | false | 直近の安定ボタン状態 |
+| currentMode | int | 0 | 現在のゲームモード（0:オリジナル入力, 1:デフォルト曲） |
 
 補足:
 - lastStableInputKey / lastButtonStableState の「安定」とは、デバウンス時間を満たして確定した状態のキー入力を指す。
@@ -110,15 +112,18 @@
 | MIMIC_TIMEOUT_MS | 3000 | マネ入力のタイムアウト閾値 |
 | INPUT_TONE_DURATION_MS | 100 | 通常入力音の鳴動時間 |
 | CORRECT_TONE_DURATION_MS | 500 | 正解通知音の鳴動時間 |
-| WRONG_LED_ON_MS | 1000 | 不正解通知時の赤LED点灯時間 |
+| WRONG_LED_BLINK_MS | 200 | 不正解通知時の赤LED1回点灯時間 |
+| WRONG_LED_BLINK_COUNT | 3 | 不正解通知時の赤LED点滅回数 |
 | DEBOUNCE_DELAY_MS | 50 | チャタリング除去時間 |
 | ORIGINAL_MODE | 0 | recordAndCompareの記録モード |
 | MIMIC_MODE | 1 | recordAndCompareの比較モード |
+| MODE_ORIGINAL_INPUT | 0 | プレイヤー入力を記録してから比較するモード |
+| MODE_DEFAULT_SONG | 1 | デフォルト曲を比較元として開始するモード |
 | RESULT_CORRECT | 1 | 判定結果: 正解 |
 | RESULT_WRONG | -1 | 判定結果: 不正解 |
 | RESULT_CONTINUE | 0 | 判定結果: 継続 |
 
-### 1-6. グローバル変数の合計バイト数（69B）の根拠
+### 1-6. グローバル変数の合計バイト数（71B）の根拠
 
 前提（Arduino UNO / ATmega328P）:
 - int = 2B
@@ -126,15 +131,15 @@
 - bool = 1B
 
 計算対象（可変グローバルのみ）:
-- int型 27個: currentState, inputKey, expectedKey, originalLength, mimicCount, compareIndex, lastStableInputKey の7個 + originalSeq[20] の20個
+- int型 28個: currentState, currentMode, inputKey, expectedKey, originalLength, mimicCount, compareIndex, lastStableInputKey の8個 + originalSeq[20] の20個
 - unsigned long型 3個
 - bool型 3個
 
 計算:
-- int: 27 x 2 = 54B
+- int: 28 x 2 = 56B
 - unsigned long: 3 x 4 = 12B
 - bool: 3 x 1 = 3B
-- 合計: 54 + 12 + 3 = 69B
+- 合計: 56 + 12 + 3 = 71B
 
 ---
 
@@ -156,7 +161,7 @@
 ```
 【処理の流れ】
 1. D9-D2（キー入力）を入力設定する。
-2. D12（オリジナル入力完了ボタン）を INPUT_PULLUP に設定する。
+2. D12（デフォルト曲モード切替ボタン）を INPUT_PULLUP に設定する。
 3. D10（ブザー）と D11（LED）を出力設定する。
 4. currentState を STATE_ORIGINAL_WAIT に初期化する。
 5. originalSeq を空にし、originalLength と mimicCount を 0 にする。
@@ -184,14 +189,15 @@
 ＜currentState が STATE_ORIGINAL_WAIT のとき＞
 1. 有効キー入力があれば STATE_ORIGINAL_RECORD に遷移する。
 2. recordAndCompare(inputKey, ORIGINAL_MODE) を実行する。
-3. originalLength が MAX_SEQUENCE_LENGTH に達した場合は追加記録を止め、完了ボタン待ちを継続する。
+3. originalLength が MAX_SEQUENCE_LENGTH に達した場合は追加記録を止め、「0」キーでの確定待ちを継続する。
+4. キー入力がない状態で readOriginalEndButton() が true の場合はデフォルト曲モードへ切替え、prepareDefaultSequence() と固定曲再生を実行後に STATE_MIMIC_WAIT へ遷移する。
 
 ＜currentState が STATE_ORIGINAL_RECORD のとき＞
 1. 有効キー入力ごとに recordAndCompare(inputKey, ORIGINAL_MODE) を実行する。
-2. readOriginalEndButton() が true なら originalLength を確定し、
+2. 入力キーが「0」なら originalLength を確定し、
    compareIndex = 0, mimicCount = 0, missDetected = false, isAllMatch = false を設定して
    STATE_MIMIC_WAIT に遷移する。
-3. オリジナル入力完了ボタンには時間制約を設けない（押下されるまで待機）。
+3. オリジナル入力の確定操作（keypad「0」）には時間制約を設けない（入力されるまで待機）。
 
 ＜currentState が STATE_MIMIC_WAIT のとき＞
 1. 有効キー入力があれば lastMimicInputMs を更新し、
@@ -213,7 +219,7 @@
 3. STATE_ORIGINAL_WAIT に戻る。
 
 ＜currentState が STATE_WRONG_NOTIFY のとき＞
-1. 赤LEDを点灯し、WRONG_LED_ON_MS（1000ms）経過で消灯する。
+1. 赤LEDを WRONG_LED_BLINK_MS（200ms）で3回点滅させる。
 2. originalSeq を空扱い（originalLength=0）にし、compareIndex, mimicCount, missDetected を初期化する。
    （注: 配列要素をNULLで物理削除するのではなく、長さを0に戻して論理的に空にする）
 3. STATE_ORIGINAL_WAIT に戻る。
@@ -227,9 +233,9 @@
 
 ---
 
-### readInputKey() — キー入力値（1-8）を取得する
+### readInputKey() — キー入力値（1-8 と turn切替）を取得する
 
-**basic_design.md 2-2 との対応：** キー入力値（1-8）を取得する
+**basic_design.md 2-2 との対応：** キー入力値（1-8 と turn切替）を取得する
 
 **引数：** なし
 
@@ -238,13 +244,14 @@
 ```
 【処理の流れ】
 1. D9-D2 をスキャンし、押下されたキーに対応する 1-8 を判定する。
-2. 押下なしの場合は 0 を返す。
-3. 1-8 以外は無効入力として 0 を返す。
-4. 現在値 rawKey と lastStableInputKey を比較し、変化がなければ 0 を返す。
-5. 変化がある場合、now - lastDebounceTimeKey < DEBOUNCE_DELAY_MS なら無視して 0 を返す。
-6. 変化があり、かつDEBOUNCE_DELAY_MS以上経過していれば入力確定し、
+2. keypad「0」が押下された場合は turn切替イベントとして内部コード（9）を返す。
+3. 押下なしの場合は 0 を返す。
+4. 1-8 と 0 以外は無効入力として 0 を返す。
+5. 現在値 rawKey と lastStableInputKey を比較し、変化がなければ 0 を返す。
+6. 変化がある場合、now - lastDebounceTimeKey < DEBOUNCE_DELAY_MS なら無視して 0 を返す。
+7. 変化があり、かつDEBOUNCE_DELAY_MS以上経過していれば入力確定し、
    lastStableInputKey = rawKey, lastDebounceTimeKey = now を更新する。
-7. 確定値が1-8ならその値を返し、0なら0を返す。
+8. 確定値が1-8または9ならその値を返し、0なら0を返す。
 
 【エラー・異常ケース】
 - 複数キー同時入力: 基本設計書の対象外として無効扱いにする。
@@ -257,9 +264,9 @@
 
 ---
 
-### readOriginalEndButton() — オリジナル入力完了ボタン押下を取得する
+### readOriginalEndButton() — デフォルト曲モード切替ボタン押下を取得する
 
-**basic_design.md 2-2 との対応：** オリジナル入力完了ボタン（D12）の押下を取得する
+**basic_design.md 2-2 との対応：** デフォルト曲モード切替ボタン（D12）の押下を取得する
 
 **引数：** なし
 
@@ -277,6 +284,27 @@
 
 【エラー・異常ケース】
 - 押しっぱなし状態: 1回押下としてのみ受け付ける。
+```
+
+---
+
+### prepareDefaultSequence() — デフォルト曲を比較用配列に読み込む
+
+**basic_design.md 2-2 との対応：** 追加機能④（デフォルト曲モード準備）
+
+**引数：** なし
+
+**戻り値：** void
+
+```
+【処理の流れ】
+1. originalLength を 0 に戻す。
+2. 事前定義したデフォルト曲配列を先頭から順に originalSeq にコピーする。
+3. MAX_SEQUENCE_LENGTH を超えない範囲で originalLength を更新する。
+4. compareIndex=0, mimicCount=0, missDetected=false を設定して比較開始可能状態にする。
+
+【エラー・異常ケース】
+- デフォルト曲長が MAX_SEQUENCE_LENGTH を超える場合は、上限までで打ち切る。
 ```
 
 ---
@@ -478,7 +506,7 @@
 3. タイムアウト判定
    - now - lastMimicInputMs >= 3000ms のとき不正解にする。
 4. 不正解通知のLED点灯
-   - 赤LEDを1秒点灯してターン終了通知を行う。
+   - 赤LEDを200msで3回点滅してターン終了通知を行う。
 ```
 
 ---
@@ -488,8 +516,8 @@
 ```
 【処理の流れ】
 （オリジナル入力終了と比較開始の切替）
-1. オリジナル側は D12 押下が来るまで入力記録を続ける。
-2. D12 押下時に originalLength を確定する。
+1. オリジナル側は keypad「0」入力が来るまで入力記録を続ける。
+2. keypad「0」入力時に originalLength を確定する。
 3. compareIndex, mimicCount, missDetected, isAllMatch を初期化して
    マネ入力待機に遷移する。
 
@@ -504,7 +532,7 @@
 
 ```
 【割り当て】
-- D12: オリジナル入力完了ボタン（INPUT_PULLUP）
+- D12: デフォルト曲モード切替ボタン（INPUT_PULLUP）
 - D10: ブザー出力（tone）
 - D11: 不正解通知LED
 
@@ -547,7 +575,8 @@
 | 3 | readOriginalEndButton() | D12を1回押す | true が1回だけ返る | | [ ] |
 | 4 | readOriginalEndButton() | ボタンを押しっぱなしにする | 連続して true にならない | | [ ] |
 | 5 | readInputKey() | チャタリング相当の短時間変化を与える | 1回入力として扱われる | | [ ] |
-| 6 | readOriginalEndButton() | オリジナル入力中に長時間（例:10秒）待ってからD12を押す | 仕様上有効入力として受理される（時間制約なし） | | [ ] |
+| 6 | readInputKey() | オリジナル入力中に長時間（例:10秒）待ってから「0」を押す | 仕様上有効入力として受理され、マネ入力待機へ遷移する（時間制約なし） | | [ ] |
+| 7 | readOriginalEndButton() | STATE_ORIGINAL_WAIT中にD12を押す | デフォルト曲モードへ遷移し、比較元が初期化される | | [ ] |
 
 ### 5-2. 出力系テスト
 
@@ -563,7 +592,7 @@
 | 8 | playMappedTone(8) | key=8 を渡す | NOTE_C5 (523Hz) が100ms鳴る | | [ ] |
 | 9 | playMappedTone(0) | key=0 を渡す | 音が鳴らない | | [ ] |
 | 10 | 正解通知処理 | 全一致条件を満たす | 500ms連続鳴動する | | [ ] |
-| 11 | 不正解通知処理 | ミス条件を満たす | D11が1秒点灯しターン終了する | | [ ] |
+| 11 | 不正解通知処理 | ミス条件を満たす | D11が0.2秒 x 3回点滅してターン終了する | | [ ] |
 
 ### 5-3. タイミング・並行動作テスト
 
@@ -575,6 +604,7 @@
 | 4 | 入力取りこぼし確認 | 連続入力を行う | 入力が無視されずに処理される | | [ ] |
 | 5 | 最大長境界値確認 | 20音入力後にさらに入力する | 20音を超えて記録しない | | [ ] |
 | 6 | ターン切替時の論理クリア確認 | 正解または不正解後に次ターン開始し、比較開始位置を確認する | originalLength=0起点で前ターン配列値を参照しない | | [ ] |
+| 7 | デフォルト曲モード比較 | STATE_ORIGINAL_WAITでD12押下後、デフォルト曲どおりに入力する | オリジナル入力なしで正解判定になる | | [ ] |
 
 ---
 
@@ -609,11 +639,11 @@
 - 正常系だけでなく、最大20音の境界値とタイムアウト判定を必ず確認すべき。
 - 無効入力と押しっぱなし入力の試験を入力系テストに含めるべき。
 - originalSeq を論理的に空へ戻す仕様（物理削除なし）を試験観点に含めるべき。
-- オリジナル入力完了ボタンに時間制約を設けない仕様を確認すべき。
+- オリジナル入力確定キー（keypad「0」）に時間制約を設けない仕様を確認すべき。
 
 **対応した内容：**
 - Section 5 に最大長境界値確認、タイムアウト判定、無効入力、押しっぱなし入力を追加した。
-- originalSeq の論理クリアと、オリジナル入力完了ボタンの時間制約なしを設計記述に反映した。
+- originalSeq の論理クリアと、オリジナル入力確定キー（keypad「0」）の時間制約なしを設計記述に反映した。
 
 ---
 

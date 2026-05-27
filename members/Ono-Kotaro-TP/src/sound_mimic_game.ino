@@ -3,14 +3,14 @@
 #include <Keypad.h>
 #include <pitches.h>
 
-const int TONES[NUM_TONES] = {
-    NOTE_C4, NOTE_C4, NOTE_G4, NOTE_G4, NOTE_A4, NOTE_A4, NOTE_G4, NOTE_EMPTY,
-    NOTE_F4, NOTE_F4, NOTE_E4, NOTE_E4, NOTE_D4, NOTE_D4, NOTE_C4, NOTE_EMPTY};
-const int TONES2[] = {
-    NOTE_C4, NOTE_D4, NOTE_E4, NOTE_C4, NOTE_D4, NOTE_E4, NOTE_G4, NOTE_E4, NOTE_D4, NOTE_C4, NOTE_D4, NOTE_E4, NOTE_D4,
-    NOTE_G4, NOTE_G4, NOTE_E4, NOTE_G4, NOTE_A4, NOTE_A4, NOTE_G4, NOTE_E4, NOTE_E4, NOTE_D4, NOTE_D4, NOTE_C4};
+// const int TONES[NUM_TONES] = {
+//     NOTE_C4, NOTE_C4, NOTE_G4, NOTE_G4, NOTE_A4, NOTE_A4, NOTE_G4, NOTE_EMPTY,
+//     NOTE_F4, NOTE_F4, NOTE_E4, NOTE_E4, NOTE_D4, NOTE_D4, NOTE_C4, NOTE_EMPTY};
+// const int TONES2[] = {
+//     NOTE_C4, NOTE_D4, NOTE_E4, NOTE_C4, NOTE_D4, NOTE_E4, NOTE_G4, NOTE_E4, NOTE_D4, NOTE_C4, NOTE_D4, NOTE_E4, NOTE_D4,
+//     NOTE_G4, NOTE_G4, NOTE_E4, NOTE_G4, NOTE_A4, NOTE_A4, NOTE_G4, NOTE_E4, NOTE_E4, NOTE_D4, NOTE_D4, NOTE_C4};
 
-// 各部品が使用するピンの定義（2-9はキー、10はブザー、11は赤LED、12はオリジナル終了ボタン）
+// 各部品が使用するピンの定義（2-9はキー、10はブザー、11は赤LED、12はモード切替ボタン）
 const int PIN_KEY_1 = 9;
 const int PIN_KEY_2 = 8;
 const int PIN_KEY_3 = 7;
@@ -36,15 +36,19 @@ byte rowPins[ROWS] = {9, 8, 7, 6};
 byte colPins[COLS] = {5, 4, 3, 2};
 Keypad customKeypad = Keypad(makeKeymap(hexaKeys), rowPins, colPins, ROWS, COLS);
 
-// 音のヘルツ定数は、include <pitches.h>から取得したものを用いてください。   
-const int TONE_DO = 262;
-const int TONE_RE = 294;
-const int TONE_MI = 330;
-const int TONE_FA = 349;
-const int TONE_SO = 392;
-const int TONE_LA = 440;
-const int TONE_SI = 494;
-const int TONE_HIGH_DO = 523;
+// 音定義は pitches.h の定数を使う
+const int TONE_DO = NOTE_C4;
+const int TONE_RE = NOTE_D4;
+const int TONE_MI = NOTE_E4;
+const int TONE_FA = NOTE_F4;
+const int TONE_SO = NOTE_G4;
+const int TONE_LA = NOTE_A4;
+const int TONE_SI = NOTE_B4;
+const int TONE_HIGH_DO = NOTE_C5;
+
+// Keypadイベント定義
+const int KEY_NONE = 0;
+const int KEY_TURN_SWITCH = 9; // '0' キーをターン切替に使う
 
 // 1-3 State constants and state variable
 const int STATE_ORIGINAL_WAIT = 0;
@@ -53,37 +57,45 @@ const int STATE_MIMIC_WAIT = 2;
 const int STATE_COMPARE = 3;
 const int STATE_CORRECT_NOTIFY = 4;
 const int STATE_WRONG_NOTIFY = 5;
-int currentState = STATE_ORIGINAL_WAIT; // 現在の状態をオリジナル入力で初期化
+int currentState = STATE_ORIGINAL_WAIT;
 
 // 1-5 Processing constants
-const int MAX_SEQUENCE_LENGTH = 20; // 最大保存音数
-const unsigned long MIMIC_TIMEOUT_MS = 3000; // ミミック入力のタイムアウト時間（ms）
-const int INPUT_TONE_DURATION_MS = 100; // 入力音の再生時間（ms）
-const int CORRECT_TONE_DURATION_MS = 500; // 正解音の再生時間（ms）
-const int WRONG_LED_ON_MS = 1000; // 間違い時のLED点灯時間（ms）
-const int DEBOUNCE_DELAY_MS = 50; // デバウンス時間（ms）
+const int MAX_SEQUENCE_LENGTH = 20;
+const unsigned long MIMIC_TIMEOUT_MS = 3000;
+const int INPUT_TONE_DURATION_MS = 100;
+const int CORRECT_TONE_DURATION_MS = 500;
+const int WRONG_LED_BLINK_MS = 200;
+const int WRONG_LED_BLINK_COUNT = 3;
+const int DEBOUNCE_DELAY_MS = 50;
 const int ORIGINAL_MODE = 0;
 const int MIMIC_MODE = 1;
+const int MODE_ORIGINAL_INPUT = 0;
+const int MODE_DEFAULT_SONG = 1;
 const int RESULT_CORRECT = 1;
 const int RESULT_WRONG = -1;
 const int RESULT_CONTINUE = 0;
 
 // 1-4 Input and judge variables
-int inputKey = 0; // 現在の入力キー（1-8、0は無効）
-int originalSeq[20]; // オリジナル音を保存する配列
-int expectedKey = 0; // ミミック入力で期待されるキー
-int originalLength = 0; // オリジナル音の長さ
-int mimicCount = 0; // ミミック入力のカウント
-int compareIndex = 0; // 比較インデックス
-unsigned long lastMimicInputMs = 0; // 最後のミミック入力時間
-bool isAllMatch = false; // 全て一致したかどうか
-bool missDetected = false; // ミスが検出されたかどうか
-unsigned long lastDebounceTimeKey = 0; // キーのデバウンス時間
-unsigned long lastDebounceTimeButton = 0; // ボタンのデバウンス時間
-int lastStableInputKey = 0; // 最後に安定した入力キー
-bool lastButtonStableState = false; // 最後に安定したボタン状態
+int inputKey = KEY_NONE;
+int originalSeq[MAX_SEQUENCE_LENGTH];
+int expectedKey = 0;
+int originalLength = 0;
+int mimicCount = 0;
+int compareIndex = 0;
+unsigned long lastMimicInputMs = 0;
+bool isAllMatch = false;
+bool missDetected = false;
+unsigned long lastDebounceTimeKey = 0;
+unsigned long lastDebounceTimeButton = 0;
+int lastStableInputKey = KEY_NONE;
+bool lastButtonStableState = false;
+int currentMode = MODE_ORIGINAL_INPUT;
 
-// Coverage counters for manual test verification.
+// ボタン切替時に使う固定曲（キー番号列）
+const int DEFAULT_SEQUENCE[] = {1, 1, 5, 5, 6, 6, 5, 4, 4, 3, 3, 2, 2, 1};
+const int DEFAULT_SEQUENCE_LENGTH = sizeof(DEFAULT_SEQUENCE) / sizeof(DEFAULT_SEQUENCE[0]);
+
+// Coverage flags for manual test verification.
 enum CoverageId {
   COV_SETUP = 0,
   COV_LOOP,
@@ -95,7 +107,9 @@ enum CoverageId {
   COV_STATE_WRONG_NOTIFY,
   COV_READ_INPUT_VALID,
   COV_READ_INPUT_INVALID,
+  COV_TURN_SWITCH_PRESS,
   COV_END_BUTTON_PRESS,
+  COV_DEFAULT_MODE_PREPARE,
   COV_RECORD_ORIGINAL,
   COV_RECORD_ORIGINAL_FULL,
   COV_COMPARE_MATCH,
@@ -106,12 +120,12 @@ enum CoverageId {
   COV_JUDGE_CONTINUE,
   COV_MAX
 };
-unsigned long coverage[COV_MAX] = {0};
-const unsigned long STATE_LOG_INTERVAL_MS = 1000; // 状態ログの表示間隔
-unsigned long lastStateLogMs = 0; // 最後に状態ログを表示した時間
-int lastLoggedState = -1; // 最後にログを表示した状態
+bool coverage[COV_MAX] = {false};
 
-// 状態に対応した文章を返す関数
+const unsigned long STATE_LOG_INTERVAL_MS = 1000;
+unsigned long lastStateLogMs = 0;
+int lastLoggedState = -1;
+
 const char* getStateName(int state) {
   switch (state) {
     case STATE_ORIGINAL_WAIT: return "STATE_ORIGINAL_WAIT";
@@ -143,30 +157,73 @@ void logStateAction(const char* action) {
 // カバレッジ回数を表示　ターン終了時に出力してますか
 void printCoverageReport() {
   Serial.println("[COVERAGE]");
-  Serial.print("setup="); Serial.println(coverage[COV_SETUP]);
-  Serial.print("loop="); Serial.println(coverage[COV_LOOP]);
-  Serial.print("state_original_wait="); Serial.println(coverage[COV_STATE_ORIGINAL_WAIT]);
-  Serial.print("state_original_record="); Serial.println(coverage[COV_STATE_ORIGINAL_RECORD]);
-  Serial.print("state_mimic_wait="); Serial.println(coverage[COV_STATE_MIMIC_WAIT]);
-  Serial.print("state_compare="); Serial.println(coverage[COV_STATE_COMPARE]);
-  Serial.print("state_correct_notify="); Serial.println(coverage[COV_STATE_CORRECT_NOTIFY]);
-  Serial.print("state_wrong_notify="); Serial.println(coverage[COV_STATE_WRONG_NOTIFY]);
-  Serial.print("read_input_valid="); Serial.println(coverage[COV_READ_INPUT_VALID]);
-  Serial.print("read_input_invalid="); Serial.println(coverage[COV_READ_INPUT_INVALID]);
-  Serial.print("end_button_press="); Serial.println(coverage[COV_END_BUTTON_PRESS]);
-  Serial.print("record_original="); Serial.println(coverage[COV_RECORD_ORIGINAL]);
-  Serial.print("record_original_full="); Serial.println(coverage[COV_RECORD_ORIGINAL_FULL]);
-  Serial.print("compare_match="); Serial.println(coverage[COV_COMPARE_MATCH]);
-  Serial.print("compare_miss="); Serial.println(coverage[COV_COMPARE_MISS]);
-  Serial.print("judge_correct="); Serial.println(coverage[COV_JUDGE_CORRECT]);
-  Serial.print("judge_wrong_miss="); Serial.println(coverage[COV_JUDGE_WRONG_MISS]);
-  Serial.print("judge_wrong_timeout="); Serial.println(coverage[COV_JUDGE_WRONG_TIMEOUT]);
-  Serial.print("judge_continue="); Serial.println(coverage[COV_JUDGE_CONTINUE]);
+  Serial.print("setup="); Serial.println(coverage[COV_SETUP] ? "HIT" : "MISS");
+  Serial.print("loop="); Serial.println(coverage[COV_LOOP] ? "HIT" : "MISS");
+  Serial.print("state_original_wait="); Serial.println(coverage[COV_STATE_ORIGINAL_WAIT] ? "HIT" : "MISS");
+  Serial.print("state_original_record="); Serial.println(coverage[COV_STATE_ORIGINAL_RECORD] ? "HIT" : "MISS");
+  Serial.print("state_mimic_wait="); Serial.println(coverage[COV_STATE_MIMIC_WAIT] ? "HIT" : "MISS");
+  Serial.print("state_compare="); Serial.println(coverage[COV_STATE_COMPARE] ? "HIT" : "MISS");
+  Serial.print("state_correct_notify="); Serial.println(coverage[COV_STATE_CORRECT_NOTIFY] ? "HIT" : "MISS");
+  Serial.print("state_wrong_notify="); Serial.println(coverage[COV_STATE_WRONG_NOTIFY] ? "HIT" : "MISS");
+  Serial.print("read_input_valid="); Serial.println(coverage[COV_READ_INPUT_VALID] ? "HIT" : "MISS");
+  Serial.print("read_input_invalid="); Serial.println(coverage[COV_READ_INPUT_INVALID] ? "HIT" : "MISS");
+  Serial.print("turn_switch_press="); Serial.println(coverage[COV_TURN_SWITCH_PRESS] ? "HIT" : "MISS");
+  Serial.print("end_button_press="); Serial.println(coverage[COV_END_BUTTON_PRESS] ? "HIT" : "MISS");
+  Serial.print("default_mode_prepare="); Serial.println(coverage[COV_DEFAULT_MODE_PREPARE] ? "HIT" : "MISS");
+  Serial.print("record_original="); Serial.println(coverage[COV_RECORD_ORIGINAL] ? "HIT" : "MISS");
+  Serial.print("record_original_full="); Serial.println(coverage[COV_RECORD_ORIGINAL_FULL] ? "HIT" : "MISS");
+  Serial.print("compare_match="); Serial.println(coverage[COV_COMPARE_MATCH] ? "HIT" : "MISS");
+  Serial.print("compare_miss="); Serial.println(coverage[COV_COMPARE_MISS] ? "HIT" : "MISS");
+  Serial.print("judge_correct="); Serial.println(coverage[COV_JUDGE_CORRECT] ? "HIT" : "MISS");
+  Serial.print("judge_wrong_miss="); Serial.println(coverage[COV_JUDGE_WRONG_MISS] ? "HIT" : "MISS");
+  Serial.print("judge_wrong_timeout="); Serial.println(coverage[COV_JUDGE_WRONG_TIMEOUT] ? "HIT" : "MISS");
+  Serial.print("judge_continue="); Serial.println(coverage[COV_JUDGE_CONTINUE] ? "HIT" : "MISS");
+}
+
+void resetGameState() {
+  originalLength = 0;
+  compareIndex = 0;
+  mimicCount = 0;
+  missDetected = false;
+  isAllMatch = false;
+  currentMode = MODE_ORIGINAL_INPUT;
+  currentState = STATE_ORIGINAL_WAIT;
+}
+
+void blinkWrongLed() {
+  for (int i = 0; i < WRONG_LED_BLINK_COUNT; i++) {
+    digitalWrite(PIN_LED_RED, HIGH);
+    delay(WRONG_LED_BLINK_MS);
+    digitalWrite(PIN_LED_RED, LOW);
+    delay(WRONG_LED_BLINK_MS);
+  }
+}
+
+void prepareDefaultSequence() {
+  originalLength = 0;
+  for (int i = 0; i < DEFAULT_SEQUENCE_LENGTH && i < MAX_SEQUENCE_LENGTH; i++) {
+    originalSeq[originalLength] = DEFAULT_SEQUENCE[i];
+    originalLength++;
+  }
+
+  compareIndex = 0;
+  mimicCount = 0;
+  missDetected = false;
+  isAllMatch = false;
+  coverage[COV_DEFAULT_MODE_PREPARE] = true;
+}
+
+void playDefaultSequence() {
+  for (int i = 0; i < originalLength; i++) {
+    playMappedTone(originalSeq[i]);
+    delay(INPUT_TONE_DURATION_MS + 60);
+  }
+  noTone(PIN_BUZZER);
 }
 
 // 初期設定
 void setup() {
-  coverage[COV_SETUP]++;
+  coverage[COV_SETUP] = true;
 
   // ボタンのピンとモード設定　INPUT_PULLUPは内部プルアップ抵抗とは
   pinMode(PIN_ORIGINAL_END_BUTTON, INPUT_PULLUP);
@@ -191,7 +248,7 @@ void setup() {
 }
 
 void loop() {
-  coverage[COV_LOOP]++;
+  coverage[COV_LOOP] = true;
 
   // 入力とその時間の読み取り
   inputKey = readInputKey();
@@ -202,30 +259,38 @@ void loop() {
     playMappedTone(inputKey);
   }
 
-  // オリジナル記録入力数を入力時に加算していないため、上限の管理ができていない気がします。
   switch (currentState) {
     case STATE_ORIGINAL_WAIT:
-      coverage[COV_STATE_ORIGINAL_WAIT]++;
-      logStateAction("waiting original first key input"); // logStateActionは定義した関数で、状態とアクションをシリアル出力する
-      // 1-8のキーが入力されたら、記録状態に遷移し、音を配列に格納（初回のみ別実行）
-      if (inputKey >= 1 && inputKey <= 8) {
+      coverage[COV_STATE_ORIGINAL_WAIT] = true;
+      logStateAction("waiting original first key input");
+
+      if (readOriginalEndButton()) {
+        Serial.println("[ACTION] switch to default song mode");
+        currentMode = MODE_DEFAULT_SONG;
+        prepareDefaultSequence();
+        playDefaultSequence();
+        lastMimicInputMs = millis();
+        currentState = STATE_MIMIC_WAIT;
+      } else if (inputKey >= 1 && inputKey <= 8) {
         Serial.println("[ACTION] transition to STATE_ORIGINAL_RECORD and record first original key");
+        currentMode = MODE_ORIGINAL_INPUT;
         currentState = STATE_ORIGINAL_RECORD;
         recordAndCompare(inputKey, ORIGINAL_MODE);
       }
       break;
 
     case STATE_ORIGINAL_RECORD:
-      coverage[COV_STATE_ORIGINAL_RECORD]++;
+      coverage[COV_STATE_ORIGINAL_RECORD] = true;
       logStateAction("recording original sequence");
+
       if (inputKey >= 1 && inputKey <= 8) {
         Serial.println("[ACTION] record original key");
         recordAndCompare(inputKey, ORIGINAL_MODE);
       }
 
-      // ボタンが押されたらオリジナルの入力を終了し、ミミックの入力状態に遷移
-      if (readOriginalEndButton()) {
-        Serial.println("[ACTION] original input finalized, move to STATE_MIMIC_WAIT");
+      // ターン切替は keypad の '0' キーを使う
+      if (inputKey == KEY_TURN_SWITCH && originalLength > 0) {
+        Serial.println("[ACTION] original input finalized by keypad '0', move to STATE_MIMIC_WAIT");
         compareIndex = 0;
         mimicCount = 0;
         missDetected = false;
@@ -236,16 +301,16 @@ void loop() {
       break;
 
     case STATE_MIMIC_WAIT:
-      coverage[COV_STATE_MIMIC_WAIT]++;
+      coverage[COV_STATE_MIMIC_WAIT] = true;
       logStateAction("waiting mimic first key input");
+
       if (inputKey >= 1 && inputKey <= 8) {
         Serial.println("[ACTION] transition to STATE_COMPARE and compare first mimic key");
         lastMimicInputMs = now;
         currentState = STATE_COMPARE;
         recordAndCompare(inputKey, MIMIC_MODE);
 
-        int result = judgeGameResult(); // 引数にinputKeyが渡されていないのに、どのように判定するのか。
-        // resultによる状態変化は1音ずつ行われているのではないか。
+        int result = judgeGameResult();
         if (result == RESULT_CORRECT) {
           Serial.println("[ACTION] judge result=CORRECT, move to STATE_CORRECT_NOTIFY");
           currentState = STATE_CORRECT_NOTIFY;
@@ -257,8 +322,9 @@ void loop() {
       break;
 
     case STATE_COMPARE:
-      coverage[COV_STATE_COMPARE]++;
+      coverage[COV_STATE_COMPARE] = true;
       logStateAction("comparing mimic input against original sequence");
+
       if (inputKey >= 1 && inputKey <= 8) {
         Serial.println("[ACTION] compare next mimic key");
         recordAndCompare(inputKey, MIMIC_MODE);
@@ -275,30 +341,25 @@ void loop() {
         }
       }
       break;
-    
+
     case STATE_CORRECT_NOTIFY:
-      coverage[COV_STATE_CORRECT_NOTIFY]++;
+      coverage[COV_STATE_CORRECT_NOTIFY] = true;
       logStateAction("playing correct notification tone and resetting turn");
       tone(PIN_BUZZER, TONE_HIGH_DO, CORRECT_TONE_DURATION_MS);
       delay(CORRECT_TONE_DURATION_MS);
+      resetGameState();
+      Serial.println("[ACTION] reset complete, move to STATE_ORIGINAL_WAIT");
+      printCoverageReport();
+      break;
 
-
-        // 共通の初期化処理を関数化
-          resetGameState();
-          Serial.println("[ACTION] reset complete, move to STATE_ORIGINAL_WAIT");
-          printCoverageReport();
-          break;
-
-        case STATE_WRONG_NOTIFY:
-          coverage[COV_STATE_WRONG_NOTIFY]++;
-          logStateAction("lighting wrong notification LED and resetting turn");
-          digitalWrite(PIN_LED_RED, HIGH);
-          delay(WRONG_LED_ON_MS);
-          digitalWrite(PIN_LED_RED, LOW);
-          resetGameState();
-          Serial.println("[ACTION] reset complete, move to STATE_ORIGINAL_WAIT");
-          printCoverageReport();
-          break;
+    case STATE_WRONG_NOTIFY:
+      coverage[COV_STATE_WRONG_NOTIFY] = true;
+      logStateAction("blinking wrong notification LED and resetting turn");
+      blinkWrongLed();
+      resetGameState();
+      Serial.println("[ACTION] reset complete, move to STATE_ORIGINAL_WAIT");
+      printCoverageReport();
+      break;
 
     default:
       Serial.println("[ACTION] unknown state detected, force STATE_ORIGINAL_WAIT");
@@ -307,64 +368,66 @@ void loop() {
   }
 }
 
-
 int readInputKey() {
-  // Keypadライブラリによる入力読み込み
   char customKey = customKeypad.getKey();
-  int rawKey = 0;
+  int rawKey = KEY_NONE;
 
   if (customKey >= '1' && customKey <= '8') {
-    rawKey = customKey - '0'; // 文字から数値に変換
-  } else if (customKey != NO_KEY) {
-    coverage[COV_READ_INPUT_INVALID]++;
-    return 0;
+    rawKey = customKey - '0';
+  } else if (customKey == '0') {
+    rawKey = KEY_TURN_SWITCH;
+    coverage[COV_TURN_SWITCH_PRESS] = true;
+  } else if (customKey == NO_KEY) {
+    return KEY_NONE;
+  } else {
+    coverage[COV_READ_INPUT_INVALID] = true;
+    return KEY_NONE;
   }
 
   unsigned long now = millis();
-  // デバウンスタイム内はすべて無効
   if (now - lastDebounceTimeKey < DEBOUNCE_DELAY_MS) {
-    return 0;
+    return KEY_NONE;
   }
 
-  // 他のキーが押された場合、無効にする
-  if (rawKey == 0) {
-    return 0;
-  }
-
-  // 安定キーを確定し、その時間を更新
   lastStableInputKey = rawKey;
   lastDebounceTimeKey = now;
 
-  if (lastStableInputKey >= 1 && lastStableInputKey <= 8) {
-    coverage[COV_READ_INPUT_VALID]++;
+  if (rawKey >= 1 && rawKey <= 8) {
+    coverage[COV_READ_INPUT_VALID] = true;
     Serial.print("[INPUT] key=");
-    Serial.println(lastStableInputKey);
-    return lastStableInputKey;
+    Serial.println(rawKey);
+  } else if (rawKey == KEY_TURN_SWITCH) {
+    Serial.println("[INPUT] turn_switch=0");
   }
 
-  return 0;
+  return rawKey;
 }
-
 
 bool readOriginalEndButton() {
   bool rawPressed = (digitalRead(PIN_ORIGINAL_END_BUTTON) == LOW);
+  bool previousStable = lastButtonStableState;
   unsigned long now = millis();
-  // デバウンスタイム内はすべて無効
+
+  if (rawPressed == previousStable) {
+    return false;
+  }
+
   if (now - lastDebounceTimeButton < DEBOUNCE_DELAY_MS) {
     return false;
   }
-  bool previousStable = lastButtonStableState;
+
   lastButtonStableState = rawPressed;
   lastDebounceTimeButton = now;
 
-  Serial.print("[INPUT] original_end_button=");
+  Serial.print("[INPUT] mode_button=");
   Serial.println(rawPressed ? "PRESSED" : "RELEASED");
 
-  // 立ち上がりエッジのみ検出
+  // 未押下 -> 押下のみ有効
   if (!previousStable && rawPressed) {
-    coverage[COV_END_BUTTON_PRESS]++;
+    coverage[COV_END_BUTTON_PRESS] = true;
     return true;
   }
+
   return false;
 }
 
@@ -388,7 +451,6 @@ void playMappedTone(int key) {
   }
 }
 
-
 bool recordAndCompare(int key, int mode) {
   if (key < 1 || key > 8) {
     return false;
@@ -398,13 +460,13 @@ bool recordAndCompare(int key, int mode) {
     if (originalLength < MAX_SEQUENCE_LENGTH) {
       originalSeq[originalLength] = key;
       originalLength++;
-      coverage[COV_RECORD_ORIGINAL]++;
+      coverage[COV_RECORD_ORIGINAL] = true;
       return true;
-    } else {
-      // 上限に達した場合は記録せず、フルカバレッジ記録
-      coverage[COV_RECORD_ORIGINAL_FULL]++;
-      return false;
     }
+
+    // 上限に達した場合は追加しないが、動作継続扱いにする
+    coverage[COV_RECORD_ORIGINAL_FULL] = true;
+    return true;
   }
 
   if (mode == MIMIC_MODE) {
@@ -414,33 +476,33 @@ bool recordAndCompare(int key, int mode) {
     if (compareIndex < 0 || compareIndex >= originalLength) {
       return false;
     }
+
     expectedKey = originalSeq[compareIndex];
     if (key == expectedKey) {
       mimicCount++;
       compareIndex++;
       lastMimicInputMs = millis();
-      coverage[COV_COMPARE_MATCH]++;
+      coverage[COV_COMPARE_MATCH] = true;
       return true;
-    } else {
-      missDetected = true;
-      coverage[COV_COMPARE_MISS]++;
-      return false;
     }
+
+    missDetected = true;
+    coverage[COV_COMPARE_MISS] = true;
+    return false;
   }
+
   return false;
 }
 
-
 int judgeGameResult() {
-  // ミスが検出された場合
   if (missDetected) {
-    coverage[COV_JUDGE_WRONG_MISS]++;
+    coverage[COV_JUDGE_WRONG_MISS] = true;
     return RESULT_WRONG;
   }
   // 全て一致した場合
   if (originalLength > 0 && compareIndex == originalLength) {
     isAllMatch = true;
-    coverage[COV_JUDGE_CORRECT]++;
+    coverage[COV_JUDGE_CORRECT] = true;
     return RESULT_CORRECT;
   }
   // タイムアウト判定（STATE_MIMIC_WAITも含める）
@@ -448,21 +510,13 @@ int judgeGameResult() {
     unsigned long now = millis();
     if (now - lastMimicInputMs >= MIMIC_TIMEOUT_MS) {
       missDetected = true;
-      coverage[COV_JUDGE_WRONG_TIMEOUT]++;
+      coverage[COV_JUDGE_WRONG_TIMEOUT] = true;
       return RESULT_WRONG;
     }
   }
-  coverage[COV_JUDGE_CONTINUE]++;
+
+  coverage[COV_JUDGE_CONTINUE] = true;
   return RESULT_CONTINUE;
-}
-// ゲーム状態の初期化処理（正解・不正解後の共通化）
-void resetGameState() {
-  originalLength = 0;
-  compareIndex = 0;
-  mimicCount = 0;
-  missDetected = false;
-  isAllMatch = false;
-  currentState = STATE_ORIGINAL_WAIT;
 }
 
 void updateLcdStatus(int turn, int index) {
