@@ -5,8 +5,10 @@
 // These stubs are for editor diagnostics only and are ignored on Arduino builds.
 #define HIGH 0x1
 #define LOW  0x0
+#define INPUT 0x0
 #define INPUT_PULLUP 0x2
 #define OUTPUT 0x1
+#define CHANGE 0x2
 #define A0 14
 
 struct SerialStub {
@@ -24,6 +26,8 @@ inline void pinMode(int, int) {}
 inline int digitalRead(int) { return HIGH; }
 inline void digitalWrite(int, int) {}
 inline int analogRead(int) { return 0; }
+inline int digitalPinToInterrupt(int pin) { return pin; }
+inline void attachInterrupt(int, void (*)(), int) {}
 inline void delay(unsigned long) {}
 inline unsigned long millis() {
   static unsigned long fake = 0;
@@ -70,6 +74,8 @@ const int STATE_VOLUME_ADJUST = 4;
 
 // Timing constants
 const unsigned long ENCODER_INTERVAL_MS = 10;
+const unsigned long ENCODER_STEP_GUARD_MS = 25;
+const unsigned long ENCODER_NOISE_GUARD_MS = 2;
 const unsigned long SOUND_INTERVAL_MS = 50;
 const unsigned long POT_INTERVAL_MS = 50;
 const unsigned long LED_INTERVAL_MS = 100;
@@ -79,15 +85,19 @@ const unsigned long IDLE_TIMEOUT_MS = 5000;
 
 // Parameter constants
 const int DEBOUNCE_DELAY = 50;
-const int PITCH_MIN = 0;
-const int PITCH_MAX = 24;
+const int PITCH_MIN = -10;
+const int PITCH_MAX = 10;
 const int VOLUME_MIN = 0;
-const int VOLUME_MAX = 10;
-const int TIMBRE_MIN = 0;
-const int TIMBRE_MAX = 2;
+const int VOLUME_MAX = 40;
+const int MELODY_MIN = 0;
+const int MELODY_MAX = 1;
 const int FREQ_MIN_HZ = 131;
 const int FREQ_MAX_HZ = 1047;
 const int BASE_FREQ_HZ = 262;
+const int MELODY_LEN = 5;
+const int NOTE_HOLD_TICKS = 4;
+const unsigned long BUTTON_BEEP_MS = 120;
+const bool MODE_BUTTON_ACTIVE_LOW = true;
 
 // Core globals from the detailed design
 int currentState = STATE_IDLE;
@@ -104,10 +114,10 @@ int encoderStep = 0;
 bool modeButtonState = false;
 int potRaw = 0;
 
-int pitchIndex = 12;
+int pitchIndex = 0;
 int volumeLevel = 8;
-int timbreMode = 0;
-int targetFreqHz = 523;
+int melodyMode = 0;
+int targetFreqHz = BASE_FREQ_HZ;
 
 bool errorFlag = false;
 int errorCode = 0;
@@ -115,25 +125,52 @@ unsigned long lastDebounceTimeMode = 0;
 unsigned long lastDebounceTimeEnc = 0;
 int lastButtonStateMode = HIGH;
 int lastButtonStateEnc = HIGH;
+int buttonReadingMode = HIGH;
 
 bool ledStateGreen = false;
 bool ledStateRed = false;
 
 unsigned long lastInputMs = 0;
+unsigned long buttonGreenUntilMs = 0;
+unsigned long buttonBeepUntilMs = 0;
+bool buttonLedToggledOn = false;
 bool encoderJumpDetected = false;
 int prevEncClk = HIGH;
+unsigned long lastEncoderAcceptedMs = 0;
+unsigned long lastEncoderEdgeMs = 0;
+int encoderBurst_count = 0;
 
-// Function declarations
-int readEncoder();
-bool handleButton();
-void updateSoundParams(int step);
-void changeMelodyPattern();
-void saveSoundPattern();
-void loadSoundPattern();
-void playCurrentSound();
-bool checkError();
-void showStatusLed(int state);
-void adjustVolume();
+bool isToneActive = false;
+int melodyNoteIndex = 0;
+int melodyTickCount = 0;
+
+// --- Rotary Encoder Interrupt Logic ---
+const int CLK_PIN = 2; // CLK をデジタルピン 2 に接続
+const int DT_PIN = 3;  // DT をデジタルピン 3 に接続
+volatile int encoderPosCount = 0;
+volatile int prevState = 3;
+int directionArray[4][4] = {
+    {0, -1, 1, 0},
+    {1, 0, 0, -1},
+    {-1, 0, 0, 1},
+    {0, 1, -1, 0}};
+volatile int directionSum = 0;
+
+void onChanged() {
+  int clkVal = digitalRead(CLK_PIN);
+  int dtVal = digitalRead(DT_PIN);
+  int state = (clkVal << 1) | dtVal;
+  directionSum += directionArray[prevState][state];
+  if (directionSum == 4) {
+    encoderPosCount++;
+    directionSum = 0;
+  }
+  if (directionSum == -4) {
+    encoderPosCount--;
+    directionSum = 0;
+  }
+  prevState = state;
+}
 
 void setup() {
   Serial.begin(9600);
@@ -152,12 +189,25 @@ void setup() {
   errorFlag = false;
   errorCode = 0;
   prevEncClk = digitalRead(PIN_ENC_CLK);
+  lastButtonStateMode = digitalRead(PIN_MODE_BUTTON);
+  buttonReadingMode = lastButtonStateMode;
+  lastEncoderEdgeMs = millis();
+  lastEncoderAcceptedMs = lastEncoderEdgeMs;
   lastInputMs = millis();
+
+  // Use pull-ups to avoid floating interrupt inputs.
+  pinMode(CLK_PIN, INPUT_PULLUP);
+  pinMode(DT_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(CLK_PIN), onChanged, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(DT_PIN), onChanged, CHANGE);
 
   digitalWrite(PIN_LED_RED, LOW);
   digitalWrite(PIN_LED_GREEN, HIGH);
   delay(120);
   digitalWrite(PIN_LED_GREEN, LOW);
+
+  // --- 追加: 電源ON時にブザーを鳴らす ---
+  tone(PIN_BUZZER, 440, 500); // 440Hzで0.5秒鳴らす（A音）
 
   Serial.println("[setup] complete");
 }
@@ -176,14 +226,22 @@ void loop() {
     Serial.print(targetFreqHz);
     Serial.print(" vol=");
     Serial.print(volumeLevel);
-    Serial.print(" timbre=");
-    Serial.println(timbreMode);
+    Serial.print(" melody=");
+    Serial.print(melodyMode);
+    Serial.print(" toneActive=");
+    Serial.println(isToneActive ? 1 : 0);
     lastLoopLog = nowMs;
   } else {
     TRACE_BRANCH("[COV] loop:periodic-log:false");
   }
 
-  encoderStep = readEncoder();
+  static int previousEncoderPosCount = 0;
+  if (previousEncoderPosCount != encoderPosCount) {
+    int diff = encoderPosCount - previousEncoderPosCount;
+    updateSoundParams(diff); // 1回の回転で1だけ加減
+    previousEncoderPosCount = encoderPosCount;
+  }
+
   modeButtonState = handleButton();
   adjustVolume();
 
@@ -209,7 +267,12 @@ void loop() {
     case STATE_IDLE:
       TRACE_BRANCH("[COV] loop:switch:STATE_IDLE");
       showStatusLed(STATE_IDLE);
-      noTone(PIN_BUZZER);
+      if (nowMs >= buttonBeepUntilMs) {
+        noTone(PIN_BUZZER);
+        isToneActive = false;
+      } else {
+        isToneActive = true;
+      }
       if (encoderStep != 0) {
         TRACE_BRANCH("[COV] loop:IDLE:encoderStep!=0:true");
         lastInputMs = nowMs;
@@ -217,7 +280,6 @@ void loop() {
       } else if (modeButtonState) {
         TRACE_BRANCH("[COV] loop:IDLE:modeButtonState:true");
         lastInputMs = nowMs;
-        changeMelodyPattern();
         currentState = STATE_PLAYING;
       } else {
         TRACE_BRANCH("[COV] loop:IDLE:no-input");
@@ -243,13 +305,13 @@ void loop() {
       if (modeButtonState) {
         TRACE_BRANCH("[COV] loop:PLAYING:modeButtonState:true");
         lastInputMs = nowMs;
-        changeMelodyPattern();
       } else {
         TRACE_BRANCH("[COV] loop:PLAYING:modeButtonState:false");
       }
       if (nowMs - lastInputMs > IDLE_TIMEOUT_MS) {
         TRACE_BRANCH("[COV] loop:PLAYING:idle-timeout:true");
         noTone(PIN_BUZZER);
+        isToneActive = false;
         currentState = STATE_IDLE;
       } else {
         TRACE_BRANCH("[COV] loop:PLAYING:idle-timeout:false");
@@ -259,6 +321,7 @@ void loop() {
     case STATE_ERROR:
       TRACE_BRANCH("[COV] loop:switch:STATE_ERROR");
       noTone(PIN_BUZZER);
+      isToneActive = false;
       showStatusLed(STATE_ERROR);
       {
         int encSw = digitalRead(PIN_ENC_SW);
@@ -305,68 +368,70 @@ int readEncoder() {
   TRACE_BRANCH("[COV] readEncoder:interval-skip:false");
   lastMillis_Enc = nowMs;
 
+  static int lastClk = HIGH;
   int clk = digitalRead(PIN_ENC_CLK);
   int dt = digitalRead(PIN_ENC_DT);
   int step = 0;
 
-  // Count only on CLK edge to avoid double count.
-  if (clk != prevEncClk) {
-    TRACE_BRANCH("[COV] readEncoder:clk-changed:true");
-    if (clk == LOW) {
-      TRACE_BRANCH("[COV] readEncoder:clk-low:true");
-      step = (dt != clk) ? 1 : -1;
+  // Only count on falling edge of CLK
+  if (lastClk == HIGH && clk == LOW) {
+    if (dt == HIGH) {
+      step = 1;
     } else {
-      TRACE_BRANCH("[COV] readEncoder:clk-low:false");
+      step = -1;
     }
-    prevEncClk = clk;
-  } else {
-    TRACE_BRANCH("[COV] readEncoder:clk-changed:false");
-  }
-
-  if (step != 0) {
-    TRACE_BRANCH("[COV] readEncoder:step!=0:true");
+    TRACE_BRANCH("[COV] readEncoder:detent:true");
     Serial.print("[readEncoder] step=");
     Serial.println(step);
   } else {
-    TRACE_BRANCH("[COV] readEncoder:step!=0:false");
+    TRACE_BRANCH("[COV] readEncoder:detent:false");
   }
-
+  lastClk = clk;
   return step;
 }
 
 bool handleButton() {
   bool switched = false;
   int reading = digitalRead(PIN_MODE_BUTTON);
+  int pressedLevel = MODE_BUTTON_ACTIVE_LOW ? LOW : HIGH;
 
-  if (reading != lastButtonStateMode) {
+  // Debounce based on raw reading changes first.
+  if (reading != buttonReadingMode) {
     TRACE_BRANCH("[COV] handleButton:reading-changed:true");
     lastDebounceTimeMode = nowMs;
+    buttonReadingMode = reading;
   } else {
     TRACE_BRANCH("[COV] handleButton:reading-changed:false");
   }
 
   if ((nowMs - lastDebounceTimeMode) > DEBOUNCE_DELAY) {
     TRACE_BRANCH("[COV] handleButton:debounce-ok:true");
-    if (lastButtonStateMode == HIGH && reading == LOW) {
-      TRACE_BRANCH("[COV] handleButton:falling-edge:true");
-      timbreMode++;
-      if (timbreMode > TIMBRE_MAX) {
-        TRACE_BRANCH("[COV] handleButton:timbre-wrap:true");
-        timbreMode = TIMBRE_MIN;
+    // Update stable state only after debounce window.
+    if (buttonReadingMode != lastButtonStateMode) {
+      // Trigger only when stable state moves into pressed level.
+      if (lastButtonStateMode != pressedLevel && buttonReadingMode == pressedLevel) {
+        TRACE_BRANCH("[COV] handleButton:falling-edge:true");
+        changeMelodyPattern();
+        switched = true;
+        buttonLedToggledOn = !buttonLedToggledOn;
+        buttonGreenUntilMs = nowMs + 300;
+        buttonBeepUntilMs = nowMs + BUTTON_BEEP_MS;
+        tone(PIN_BUZZER, targetFreqHz, BUTTON_BEEP_MS);
+        isToneActive = true;
+        Serial.println(5555);
+        Serial.println("音色が変更されました"); // Display message in Japanese
+        Serial.print("melodyMode=");
+        Serial.println(melodyMode);
       } else {
-        TRACE_BRANCH("[COV] handleButton:timbre-wrap:false");
+        TRACE_BRANCH("[COV] handleButton:falling-edge:false");
       }
-      switched = true;
-      Serial.print("[handleButton] timbre switched to ");
-      Serial.println(timbreMode);
+      lastButtonStateMode = buttonReadingMode;
     } else {
-      TRACE_BRANCH("[COV] handleButton:falling-edge:false");
+      TRACE_BRANCH("[COV] handleButton:stable-nochange");
     }
   } else {
     TRACE_BRANCH("[COV] handleButton:debounce-ok:false");
   }
-
-  lastButtonStateMode = reading;
   return switched;
 }
 
@@ -377,29 +442,26 @@ void updateSoundParams(int step) {
   if (step == 0) {
     TRACE_BRANCH("[COV] updateSoundParams:step==0:true");
     return;
+  } else {
+    TRACE_BRANCH("[COV] updateSoundParams:step==0:false");
   }
-  TRACE_BRANCH("[COV] updateSoundParams:step==0:false");
+
+  // Prevent incrementing above max, but allow decrementing from max
+  if (step > 0 && pitchIndex >= PITCH_MAX) {
+    TRACE_BRANCH("[COV] updateSoundParams:inc-at-max:true");
+    return;
+  }
+  // Prevent decrementing below min, but allow incrementing from min
+  if (step < 0 && pitchIndex <= PITCH_MIN) {
+    TRACE_BRANCH("[COV] updateSoundParams:dec-at-min:true");
+    return;
+  }
 
   pitchIndex += step;
-  if (pitchIndex < PITCH_MIN) {
-    TRACE_BRANCH("[COV] updateSoundParams:pitch<min:true");
-    pitchIndex = PITCH_MIN;
-  } else {
-    TRACE_BRANCH("[COV] updateSoundParams:pitch<min:false");
-  }
-  if (pitchIndex > PITCH_MAX) {
-    TRACE_BRANCH("[COV] updateSoundParams:pitch>max:true");
-    pitchIndex = PITCH_MAX;
-  } else {
-    TRACE_BRANCH("[COV] updateSoundParams:pitch>max:false");
-  }
 
   float ratio = pow(2.0, pitchIndex / 12.0);
   targetFreqHz = (int)(BASE_FREQ_HZ * ratio + 0.5);
-
-  Serial.print("[updateSoundParams] pitchIndex=");
-  Serial.print(pitchIndex);
-  Serial.print(" targetFreqHz=");
+  Serial.print("[updateSoundParams] targetFreqHz=");
   Serial.println(targetFreqHz);
 
   if (targetFreqHz < FREQ_MIN_HZ || targetFreqHz > FREQ_MAX_HZ) {
@@ -410,25 +472,24 @@ void updateSoundParams(int step) {
   } else {
     TRACE_BRANCH("[COV] updateSoundParams:freq-out:false");
   }
-
   lastInputMs = nowMs;
 }
 
 void changeMelodyPattern() {
-  Serial.println("[changeMelodyPattern] apply timbre confirmation sound");
+  Serial.println("[changeMelodyPattern] toggle melody pattern");
 
-  if (timbreMode < TIMBRE_MIN || timbreMode > TIMBRE_MAX) {
-    TRACE_BRANCH("[COV] changeMelodyPattern:timbre-invalid:true");
-    timbreMode = TIMBRE_MIN;
-    Serial.println("[changeMelodyPattern] invalid timbre fixed to 0");
+  melodyMode++;
+  if (melodyMode > MELODY_MAX) {
+    TRACE_BRANCH("[COV] changeMelodyPattern:melody-wrap:true");
+    melodyMode = MELODY_MIN;
   } else {
-    TRACE_BRANCH("[COV] changeMelodyPattern:timbre-invalid:false");
+    TRACE_BRANCH("[COV] changeMelodyPattern:melody-wrap:false");
   }
+  melodyNoteIndex = 0;
+  melodyTickCount = 0;
 
-  tone(PIN_BUZZER, targetFreqHz, 60);
-
-  Serial.print("[changeMelodyPattern] current timbreMode=");
-  Serial.println(timbreMode);
+  Serial.print("[changeMelodyPattern] current melodyMode=");
+  Serial.println(melodyMode);
 }
 
 void saveSoundPattern() {
@@ -440,55 +501,47 @@ void loadSoundPattern() {
 }
 
 void playCurrentSound() {
-  static int arpeggioIndex = 0;
-  static bool tremoloPhase = false;
-  static int volumeGateCounter = 0;
-
-  int freq = targetFreqHz;
-
-  if (timbreMode == 1) {
-    TRACE_BRANCH("[COV] playCurrentSound:timbre==1");
-    tremoloPhase = !tremoloPhase;
-    freq = targetFreqHz + (tremoloPhase ? 8 : -8);
-  } else if (timbreMode == 2) {
-    TRACE_BRANCH("[COV] playCurrentSound:timbre==2");
-    const int intervals[3] = {0, 4, 7};
-    float ratio = pow(2.0, intervals[arpeggioIndex] / 12.0);
-    freq = (int)(targetFreqHz * ratio + 0.5);
-    arpeggioIndex = (arpeggioIndex + 1) % 3;
+  if (melodyMode == 0) {
+    TRACE_BRANCH("[COV] playCurrentSound:melodyMode==0:true");
+    tone(PIN_BUZZER, targetFreqHz);
+    digitalWrite(PIN_LED_GREEN, HIGH); // Turn on green LED
+  } else if (melodyMode == 1) {
+    TRACE_BRANCH("[COV] playCurrentSound:melodyMode==1:true");
+    if (melodyNoteIndex < MELODY_LEN) {
+      TRACE_BRANCH("[COV] playCurrentSound:melodyNoteIndex<MELODY_LEN:true");
+      tone(PIN_BUZZER, targetFreqHz, NOTE_HOLD_TICKS * SOUND_INTERVAL_MS);
+      digitalWrite(PIN_LED_GREEN, HIGH); // Turn on green LED
+      melodyTickCount++;
+      if (melodyTickCount >= NOTE_HOLD_TICKS) {
+        TRACE_BRANCH("[COV] playCurrentSound:melodyTickCount>=NOTE_HOLD_TICKS:true");
+        melodyTickCount = 0;
+        melodyNoteIndex++;
+      } else {
+        TRACE_BRANCH("[COV] playCurrentSound:melodyTickCount>=NOTE_HOLD_TICKS:false");
+      }
+    } else {
+      TRACE_BRANCH("[COV] playCurrentSound:melodyNoteIndex<MELODY_LEN:false");
+      noTone(PIN_BUZZER);
+      digitalWrite(PIN_LED_GREEN, LOW); // Turn off green LED
+      melodyNoteIndex = 0;
+    }
   } else {
-    TRACE_BRANCH("[COV] playCurrentSound:timbre-other");
-  }
-
-  if (freq < FREQ_MIN_HZ || freq > (FREQ_MAX_HZ * 2)) {
-    TRACE_BRANCH("[COV] playCurrentSound:freq-invalid:true");
-    Serial.println("[playCurrentSound] invalid frequency, stop tone");
+    TRACE_BRANCH("[COV] playCurrentSound:melodyMode==0:false");
     noTone(PIN_BUZZER);
-    errorFlag = true;
-    errorCode = 2;
-    return;
-  } else {
-    TRACE_BRANCH("[COV] playCurrentSound:freq-invalid:false");
-  }
-
-  volumeGateCounter = (volumeGateCounter + 1) % (VOLUME_MAX + 1);
-  if (volumeLevel <= 0 || volumeGateCounter > volumeLevel) {
-    TRACE_BRANCH("[COV] playCurrentSound:gate-off:true");
-    noTone(PIN_BUZZER);
-  } else {
-    TRACE_BRANCH("[COV] playCurrentSound:gate-off:false");
-    tone(PIN_BUZZER, freq);
+    digitalWrite(PIN_LED_GREEN, LOW); // Turn off green LED
   }
 
   static unsigned long lastPlayLog = 0;
   if (nowMs - lastPlayLog >= 250) {
     TRACE_BRANCH("[COV] playCurrentSound:periodic-log:true");
     Serial.print("[playCurrentSound] freq=");
-    Serial.print(freq);
+    Serial.print(targetFreqHz);
+    Serial.print(" note=");
+    Serial.print(melodyNoteIndex);
     Serial.print(" volume=");
     Serial.print(volumeLevel);
-    Serial.print(" timbre=");
-    Serial.println(timbreMode);
+    Serial.print(" melody=");
+    Serial.println(melodyMode);
     lastPlayLog = nowMs;
   } else {
     TRACE_BRANCH("[COV] playCurrentSound:periodic-log:false");
@@ -527,6 +580,13 @@ bool checkError() {
   } else {
     TRACE_BRANCH("[COV] checkError:encoder-jump:false");
   }
+  if (melodyMode < MELODY_MIN || melodyMode > MELODY_MAX) {
+    TRACE_BRANCH("[COV] checkError:melody-out:true");
+    errorCode = 14;
+    detected = true;
+  } else {
+    TRACE_BRANCH("[COV] checkError:melody-out:false");
+  }
 
   if (detected) {
     TRACE_BRANCH("[COV] checkError:detected:true");
@@ -553,41 +613,42 @@ void showStatusLed(int state) {
   TRACE_BRANCH("[COV] showStatusLed:interval-skip:false");
   lastMillis_Led = nowMs;
 
-  static bool blink = false;
-  blink = !blink;
-
   switch (state) {
     case STATE_IDLE:
       TRACE_BRANCH("[COV] showStatusLed:switch:STATE_IDLE");
-      ledStateGreen = false;
-      ledStateRed = false;
+      ledStateGreen = isToneActive;
+      ledStateRed = !isToneActive;
       break;
     case STATE_SETTING:
       TRACE_BRANCH("[COV] showStatusLed:switch:STATE_SETTING");
-      ledStateGreen = blink;
-      ledStateRed = false;
+      ledStateGreen = isToneActive;
+      ledStateRed = !isToneActive;
       break;
     case STATE_PLAYING:
       TRACE_BRANCH("[COV] showStatusLed:switch:STATE_PLAYING");
-      ledStateGreen = true;
-      ledStateRed = false;
+      ledStateGreen = isToneActive;
+      ledStateRed = !isToneActive;
       break;
     case STATE_VOLUME_ADJUST:
       TRACE_BRANCH("[COV] showStatusLed:switch:STATE_VOLUME_ADJUST");
-      ledStateGreen = blink;
-      ledStateRed = false;
+      ledStateGreen = isToneActive;
+      ledStateRed = !isToneActive;
       break;
     case STATE_ERROR:
       TRACE_BRANCH("[COV] showStatusLed:switch:STATE_ERROR");
       ledStateGreen = false;
-      ledStateRed = blink;
+      ledStateRed = true;
       break;
     default:
       TRACE_BRANCH("[COV] showStatusLed:switch:default");
       ledStateGreen = false;
-      ledStateRed = blink;
+      ledStateRed = true;
       break;
   }
+
+  // Follow button toggle state: press once ON, press again OFF.
+  ledStateGreen = buttonLedToggledOn;
+  ledStateRed = false;
 
   digitalWrite(PIN_LED_GREEN, ledStateGreen ? HIGH : LOW);
   digitalWrite(PIN_LED_RED, ledStateRed ? HIGH : LOW);
@@ -611,11 +672,17 @@ void adjustVolume() {
   TRACE_BRANCH("[COV] adjustVolume:interval-skip:false");
   lastMillis_Pot = nowMs;
 
-  static int smoothed = 0;
+  static int lastMappedVolume = 0;
   potRaw = analogRead(PIN_POT);
-  smoothed = (smoothed * 3 + potRaw) / 4;
+  int mappedVolume = map(potRaw, 0, 1023, VOLUME_MIN, VOLUME_MAX);
 
-  int mappedVolume = map(smoothed, 0, 1023, VOLUME_MIN, VOLUME_MAX);
+  // Ensure the volume changes by 1 step per significant movement
+  if (mappedVolume > lastMappedVolume) {
+    mappedVolume = lastMappedVolume + 1;
+  } else if (mappedVolume < lastMappedVolume) {
+    mappedVolume = lastMappedVolume - 1;
+  }
+
   if (mappedVolume < VOLUME_MIN) {
     TRACE_BRANCH("[COV] adjustVolume:mapped<min:true");
     mappedVolume = VOLUME_MIN;
@@ -632,9 +699,8 @@ void adjustVolume() {
   if (mappedVolume != volumeLevel) {
     TRACE_BRANCH("[COV] adjustVolume:value-changed:true");
     volumeLevel = mappedVolume;
-    Serial.print("[adjustVolume] potRaw=");
-    Serial.print(potRaw);
-    Serial.print(" volumeLevel=");
+    lastMappedVolume = mappedVolume;
+    Serial.print("volume：");
     Serial.println(volumeLevel);
 
     if (currentState != STATE_ERROR) {
@@ -646,5 +712,15 @@ void adjustVolume() {
     }
   } else {
     TRACE_BRANCH("[COV] adjustVolume:value-changed:false");
+  }
+
+  static unsigned long lastPotLog = 0;
+  if (nowMs - lastPotLog >= 1000) {
+    TRACE_BRANCH("[COV] adjustVolume:periodic-log:true");
+    Serial.print("volume：");
+    Serial.println(volumeLevel);
+    lastPotLog = nowMs;
+  } else {
+    TRACE_BRANCH("[COV] adjustVolume:periodic-log:false");
   }
 }

@@ -21,7 +21,7 @@
 |:--|:--|
 | 作品タイトル | 反射神経を測ろうゲーム |
 | 状態の種類（1-2 状態遷移から） | 開始待ち / READY表示 / 待機状態 / 合図状態 / 結果状態 / 失敗状態 |
-| 実装する関数の数（2-2 関数一覧から） | 11個 |
+| 実装する関数の数（2-2 関数一覧から） | 13個 |
 | グローバル変数の合計バイト数（2-1 SRAM確認から） | 約55B（現行コードの可変グローバル概算） |
 
 ---
@@ -34,9 +34,9 @@
 ```
 【ピン定義】（basic_design.md 3-1 から転記）
   PIN_BUTTON   = 2    // タクトスイッチ（INPUT_PULLUP）
-  PIN_BUZZER   = 8    // パッシブブザー
+  PIN_BUZZER   = 6    // パッシブブザー
   PIN_LCD_RS   = 7
-  PIN_LCD_E    = 6
+  PIN_LCD_E    = 8
   PIN_LCD_D4   = 9
   PIN_LCD_D5   = 10
   PIN_LCD_D6   = 11
@@ -76,6 +76,11 @@
   GO_TIMEOUT_MS     : const unsigned long = 3000
   RESULT_DISPLAY_MS : const unsigned long = 2000
   AVERAGE_DISPLAY_MS: const unsigned long = 2000
+
+【ランキング表示（非永続）】
+  RANKING_SIZE      : const int = 5
+  EMPTY_RANK        : const unsigned long = 4294967295
+  rankingUs[5]      : unsigned long 配列（初期値はすべて EMPTY_RANK）
 ```
 
 ---
@@ -91,6 +96,9 @@
 
 ```
 【処理の流れ】
+0. シリアル通信を初期化する
+  - Serial.begin(9600)
+
 1. ピンモードを設定する
    - PIN_BUTTON → INPUT_PULLUP
    - PIN_BUZZER → OUTPUT
@@ -103,6 +111,9 @@
 
 4. 初期状態へ遷移する
    - enterState(STATE_IDLE)
+
+5. 初期ランキングをシリアルへ表示する
+  - printRanking()
 ```
 
 ---
@@ -133,7 +144,9 @@
 
 ＜currentState が STATE_GO（合図中）のとき＞
   - ボタン押下で reactionTimeUs を計測
+  - updateRanking(reactionTimeUs) でTOP5を更新
   - best更新、結果表示、平均表示、必要ならベスト音再生
+  - printRanking() でランキングをシリアル表示
   - STATE_RESULT へ遷移
   - 一定時間押下なしなら TIMEOUT 表示して STATE_RESULT へ遷移
 
@@ -343,6 +356,49 @@
 【エラー・異常ケース】
 - 不正な next:
   表示更新せず状態値のみ保持
+```
+
+---
+
+### updateRanking(reactionUs) — ランキング更新
+
+**basic_design.md 2-2 との対応：** A04 ランキング更新
+
+**引数：** reactionUs（unsigned long）
+
+**戻り値：** なし（void）
+
+```
+【処理の流れ】
+1. rankingUs[0..4] を先頭（最速）から順に比較
+2. reactionUs が入る位置を見つけたら、後ろの要素を1つずつ後方へシフト
+3. 該当位置に reactionUs を挿入
+4. TOP5圏外なら何も変更しない
+
+【エラー・異常ケース】
+- ランキング空き要素:
+  EMPTY_RANK（4294967295UL）を空きとして扱う
+```
+
+---
+
+### printRanking() — シリアルランキング表示
+
+**basic_design.md 2-2 との対応：** A05 ランキング表示
+
+**引数：** なし
+
+**戻り値：** なし（void）
+
+```
+【処理の流れ】
+1. シリアルモニタへ "RANKING TOP5" ヘッダを表示
+2. rankingUs を先頭から走査し、記録がある順位だけ ms で表示
+3. 記録がない場合は "No records yet" を表示
+
+【エラー・異常ケース】
+- 電源再投入後:
+  RAM保持のためランキングは空になる（非永続仕様）
 ```
 
 ---

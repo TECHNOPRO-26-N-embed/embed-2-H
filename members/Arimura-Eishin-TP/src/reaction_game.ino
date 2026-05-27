@@ -57,6 +57,16 @@ const unsigned long GO_TIMEOUT_MS = 3000;
 const unsigned long READY_DISPLAY_MS = 800;
 const unsigned long RESULT_DISPLAY_MS = 2000;
 const unsigned long AVERAGE_DISPLAY_MS = 2000;
+const int RANKING_SIZE = 5;
+const unsigned long EMPTY_RANK = 4294967295UL;
+
+unsigned long rankingUs[RANKING_SIZE] = {
+  EMPTY_RANK,
+  EMPTY_RANK,
+  EMPTY_RANK,
+  EMPTY_RANK,
+  EMPTY_RANK
+};
 
 void setup();
 void loop();
@@ -69,15 +79,20 @@ bool checkFalseStart();
 void playSound(int soundType);
 void displayAverage(unsigned long avgUs);
 void enterState(GameState next);
+void updateRanking(unsigned long reactionUs);
+void printRanking();
 
 // ハードウェアを初期化し、初期画面を表示する。
 void setup() {
+  Serial.begin(9600);
+
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(BUZZER_PIN, OUTPUT);
 
   lcd.begin(16, 2);
   randomSeed(analogRead(A0));
   enterState(STATE_IDLE);
+  printRanking();
 }
 
 // 状態マシンを1ステップ実行する。
@@ -118,9 +133,11 @@ void loop() {
     case STATE_GO:
       if (readButton()) {
         reactionTimeUs = measureReaction();
+        updateRanking(reactionTimeUs);
         bool isBest = updateBest(reactionTimeUs);
         lastResultReactionUs = reactionTimeUs;
         displayResult(reactionTimeUs);
+        printRanking();
         if (isBest) {
           playSound(SOUND_BEST);
           if (LCD_E_PIN == BUZZER_PIN) {
@@ -333,4 +350,41 @@ void enterState(GameState next) {
     lcd.print("MISS");
     playSound(SOUND_MISS);
   }
+}
+
+// 反応時間ランキング（TOP5）を昇順で更新する。
+void updateRanking(unsigned long reactionUs) {
+  for (int i = 0; i < RANKING_SIZE; i++) {
+    if (reactionUs < rankingUs[i]) {
+      for (int j = RANKING_SIZE - 1; j > i; j--) {
+        rankingUs[j] = rankingUs[j - 1];
+      }
+      rankingUs[i] = reactionUs;
+      return;
+    }
+  }
+}
+
+// シリアルモニタにランキングを表示する（電源OFFでリセット）。
+void printRanking() {
+  Serial.println(F("=== RANKING TOP5 (ms) ==="));
+
+  bool hasRecord = false;
+  for (int i = 0; i < RANKING_SIZE; i++) {
+    if (rankingUs[i] == EMPTY_RANK) {
+      continue;
+    }
+
+    hasRecord = true;
+    Serial.print(i + 1);
+    Serial.print(F(". "));
+    Serial.print(rankingUs[i] / 1000);
+    Serial.println(F(" ms"));
+  }
+
+  if (!hasRecord) {
+    Serial.println(F("No records yet"));
+  }
+
+  Serial.println();
 }
