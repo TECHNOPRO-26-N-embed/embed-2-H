@@ -78,6 +78,7 @@
   <text x="726" y="270" class="small">OE(13) -&gt; GND, MR(10) -&gt; 5V</text>
   <text x="726" y="294" class="small">Q0-Q7 -&gt; a,b,c,d,e,f,g,dp</text>
   <text x="726" y="318" class="small">Each line via 220-330 ohm resistor</text>
+  <text x="740" y="330" class="small">220Ω resistors added to Q0-Q7 lines for current limiting</text>
 
   <rect x="1120" y="130" width="340" height="260" class="module"/>
   <text x="1146" y="168" class="label">4-digit 7-segment display</text>
